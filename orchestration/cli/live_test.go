@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +85,87 @@ func TestLiveCLIOrchestration(t *testing.T) {
 			}
 			assertSemanticProjectionIntegrity(t, snapshot.Projection)
 		})
+	}
+}
+
+func TestLiveCodexWorkspaceEdit(t *testing.T) {
+	if os.Getenv("G0CODE_LIVE") != "1" {
+		t.Skip("set G0CODE_LIVE=1 to run the real provider")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	o := orchestration.New(nil)
+	executor := NewExecutor(o)
+	executor.RegisterDefaults()
+	defer executor.Close()
+	threadID := orchestration.ThreadID("live-workspace-edit")
+	workspace := t.TempDir()
+	dispatch(t, o, orchestration.Command{Type: orchestration.CommandThreadCreate, CommandID: "create", ThreadID: threadID,
+		Payload: orchestration.CreateThread{ProjectID: "live", Title: "Workspace edit", WorktreePath: &workspace,
+			RuntimeMode: orchestration.RuntimeAutoAcceptEdits, InteractionMode: orchestration.InteractionDefault,
+			ModelSelection: orchestration.ModelSelection{InstanceID: "codex", Model: "default"}}})
+	started := dispatch(t, o, orchestration.Command{Type: orchestration.CommandMessageDispatch, CommandID: "edit", ThreadID: threadID,
+		Payload: orchestration.DispatchMessage{MessageID: "edit-message",
+			Text:         "Create a local file named result.txt containing exactly G0CODE_TOOLS_OK, then read it with a local shell command to verify it. Do not use network or MCP.",
+			DispatchMode: orchestration.DispatchMode{Type: orchestration.DispatchStartImmediately}}})
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(ctx, started.Effects[0]) }()
+	for {
+		snapshot, err := o.Snapshot(ctx, threadID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		responded := false
+		for _, request := range snapshot.Projection.RuntimeRequests {
+			if request.Status != orchestration.RequestPending {
+				continue
+			}
+			decision := "accept"
+			response := dispatch(t, o, orchestration.Command{Type: orchestration.CommandRuntimeRequestRespond,
+				CommandID: orchestration.CommandID("approve-" + string(request.ID)), ThreadID: threadID,
+				Payload: orchestration.RuntimeRequestResponse{RequestID: request.ID, Decision: &decision}})
+			for _, effect := range response.Effects {
+				if err := executor.Execute(ctx, effect); err != nil {
+					t.Fatal(err)
+				}
+			}
+			responded = true
+		}
+		if responded {
+			continue
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			goto finished
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+
+finished:
+	content, err := os.ReadFile(filepath.Join(workspace, "result.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(content)) != "G0CODE_TOOLS_OK" {
+		t.Fatalf("result.txt = %q", content)
+	}
+	snapshot, _ := o.Snapshot(ctx, threadID)
+	if snapshot.Projection.Runs[0].Status != orchestration.RunCompleted {
+		t.Fatalf("run did not complete: %+v", snapshot.Projection.Runs[0])
+	}
+	foundTool := false
+	for _, item := range snapshot.Projection.TurnItems {
+		if item.Type == "command_execution" || item.Type == "file_change" {
+			foundTool = true
+		}
+	}
+	if !foundTool {
+		t.Fatalf("native tool activity missing: %+v", snapshot.Projection.TurnItems)
 	}
 }
 

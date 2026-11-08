@@ -2,4 +2,5 @@
 coverage.out
 /dist/
 /build/
+/.mygo/
 /mygo/

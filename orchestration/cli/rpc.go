@@ -20,10 +20,12 @@ type rpcResponse struct {
 }
 
 type rpcRequest struct {
-	ID     json.RawMessage
-	Method string
-	Params json.RawMessage
-	Raw    json.RawMessage
+	ID        json.RawMessage
+	RequestID json.RawMessage
+	Type      string
+	Method    string
+	Params    json.RawMessage
+	Raw       json.RawMessage
 }
 
 type rpcClientOptions struct {
@@ -252,8 +254,12 @@ func (c *rpcClient) route(raw json.RawMessage) {
 		}
 		return
 	}
-	if frame.Method != "" && len(frame.ID) > 0 && frame.JSONRPC == "2.0" {
-		request := rpcRequest{ID: frame.ID, Method: frame.Method, Params: frame.Params, Raw: raw}
+	if (frame.Method != "" && len(frame.ID) > 0 && frame.Type != "extension_ui_request") || (frame.Type == "control_request" && len(frame.RequestID) > 0) {
+		requestID := frame.ID
+		if frame.Type == "control_request" {
+			requestID = frame.RequestID
+		}
+		request := rpcRequest{ID: requestID, RequestID: frame.RequestID, Type: frame.Type, Method: frame.Method, Params: frame.Params, Raw: raw}
 		var result any
 		var rpcErr *rpcError
 		if c.onRequest != nil {
@@ -262,10 +268,20 @@ func (c *rpcClient) route(raw json.RawMessage) {
 			rpcErr = &rpcError{Code: -32601, Message: "client callback not supported"}
 		}
 		response := map[string]any{"jsonrpc": "2.0", "id": frame.ID}
+		if frame.Type == "control_request" {
+			response = map[string]any{"type": "control_response", "response": map[string]any{"request_id": requestID}}
+		}
 		if rpcErr != nil {
-			response["error"] = rpcErr
+			if frame.Type == "control_request" {
+				response["response"].(map[string]any)["subtype"] = "error"
+				response["response"].(map[string]any)["error"] = rpcErr.Message
+			} else {
+				response["error"] = rpcErr
+			}
+		} else if frame.Type == "control_request" {
+			response["response"].(map[string]any)["subtype"] = "success"
+			response["response"].(map[string]any)["result"] = result
 		} else {
-			response["result"] = result
 		}
 		_ = c.write(response)
 		return

@@ -104,6 +104,22 @@ func (s *Store) CompleteEffect(ctx context.Context, id, workerID string, executi
 	return nil
 }
 
+func (s *Store) RenewEffect(ctx context.Context, id, workerID string, lease time.Duration) (bool, error) {
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE orchestration_effects
+		SET lease_expires_at = ?, updated_at = ?
+		WHERE id = ? AND claimed_by = ? AND status = 'running' AND lease_expires_at > ?`,
+		now.Add(lease).UnixMilli(), now.Format(time.RFC3339Nano), id, workerID, now.UnixMilli())
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
 func (s *Store) ListEffects(ctx context.Context) ([]orchestration.OutboxEffect, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT payload_json, status, attempts, last_error, claimed_by,
 		lease_expires_at, created_at, updated_at FROM orchestration_effects ORDER BY created_at, id`)

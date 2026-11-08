@@ -165,6 +165,48 @@ func TestWorkerCompletesProviderTurnAfterRestart(t *testing.T) {
 	}
 }
 
+func TestWorkerRenewsLongRunningEffectLease(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	o := orchestration.New(s)
+	dispatch(t, o, createCommand("create", "thread-1"))
+	dispatch(t, o, messageCommand("send", "thread-1", "message-1"))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	worker := &orchestration.EffectWorker{Store: s, WorkerID: "worker-long", Lease: 30 * time.Millisecond,
+		Executor: orchestration.EffectExecutorFunc(func(context.Context, orchestration.Effect) error {
+			close(started)
+			<-release
+			return nil
+		})}
+	done := make(chan error, 1)
+	go func() {
+		_, err := worker.RunOnce(ctx)
+		done <- err
+	}()
+	<-started
+	time.Sleep(70 * time.Millisecond)
+	claimed, err := s.ClaimEffects(ctx, "worker-other", 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("running effect was reclaimed despite renewal: %+v", claimed)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	effects, _ := s.ListEffects(ctx)
+	if len(effects) != 1 || effects[0].Status != orchestration.EffectCompleted || effects[0].Attempts != 1 {
+		t.Fatalf("long-running effect did not complete on its original lease: %+v", effects)
+	}
+}
+
 func TestMultiThreadDelegationSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.sqlite")

@@ -1,0 +1,11 @@
+{
+  "name": "g0code",
+  "slug": "g0code",
+  "identifier": "dev.g0code",
+  "version": "0.1.0",
+  "license": "MIT",
+  "main": "./cmd/g0code",
+  "linux": {
+    "webview": false
+  }
+}

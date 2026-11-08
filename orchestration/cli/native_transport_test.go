@@ -159,6 +159,7 @@ func runRecordedNativePeer(fixture string) error {
 	entries := readTranscriptEntries(fixture)
 	writer := bufio.NewWriter(os.Stdout)
 	reader := bufio.NewReader(os.Stdin)
+	requestIDs := make(map[string]any)
 	for index := 0; index < len(entries); {
 		for index < len(entries) && entries[index].Type != "expect_outbound" {
 			index++
@@ -175,14 +176,23 @@ func runRecordedNativePeer(fixture string) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", expected.Label, err)
 		}
+		if method, ok := actual["method"].(string); ok && actual["kind"] != "response" {
+			requestIDs[method] = actual["id"]
+		}
 		if err := assertSameNativeOperation(expected.Frame, actual); err != nil {
 			return fmt.Errorf("%s: %w", expected.Label, err)
 		}
 		index++
 		for index < len(entries) && entries[index].Type == "emit_inbound" {
 			frame := decodeNativeMap(entries[index].Frame)
+			if frame["kind"] == "request" && frame["id"] == nil {
+				frame["id"] = fmt.Sprintf("server-%d", index)
+			}
 			if nativeFrameIsResponse(frame) {
 				frame["id"] = actual["id"]
+				if method, ok := frame["method"].(string); ok && requestIDs[method] != nil {
+					frame["id"] = requestIDs[method]
+				}
 			}
 			if err := writeNativeRecord(writer, frame); err != nil {
 				return err
@@ -264,6 +274,9 @@ func writeNativeRecord(writer *bufio.Writer, record map[string]any) error {
 
 func assertSameNativeOperation(expectedRaw json.RawMessage, actual map[string]any) error {
 	expected := decodeNativeMap(expectedRaw)
+	if expected["kind"] == "response" {
+		return nil
+	}
 	for _, key := range []string{"method", "type"} {
 		if expected[key] != nil && expected[key] != actual[key] {
 			return fmt.Errorf("%s = %v, want %v; actual=%+v", key, actual[key], expected[key], actual)

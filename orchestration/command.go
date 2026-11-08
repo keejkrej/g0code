@@ -13,6 +13,7 @@ const (
 	CommandThreadArchive         CommandType = "thread.archive"
 	CommandThreadUnarchive       CommandType = "thread.unarchive"
 	CommandThreadDelete          CommandType = "thread.delete"
+	CommandThreadRuntimeModeSet  CommandType = "thread.runtime-mode.set"
 	CommandMessageDispatch       CommandType = "message.dispatch"
 	CommandRunInterrupt          CommandType = "run.interrupt"
 	CommandRuntimeRequestRespond CommandType = "runtime-request.respond"
@@ -117,6 +118,10 @@ type ProviderSwitch struct {
 	ModelSelection ModelSelection `json:"modelSelection"`
 }
 
+type RuntimeModeChange struct {
+	RuntimeMode RuntimeMode `json:"runtimeMode"`
+}
+
 func commandPayload[T any](command Command) (T, bool) {
 	switch payload := command.Payload.(type) {
 	case T:
@@ -197,6 +202,11 @@ func validateCommand(command Command) error {
 		payload, ok := commandPayload[CancelQueuedRun](command)
 		if !ok || payload.RunID == "" {
 			return fmt.Errorf("queued-run.cancel requires CancelQueuedRun with runId: %w", ErrInvalidCommand)
+		}
+	case CommandThreadRuntimeModeSet:
+		payload, ok := commandPayload[RuntimeModeChange](command)
+		if !ok || payload.RuntimeMode != RuntimeApprovalRequired && payload.RuntimeMode != RuntimeAutoAcceptEdits && payload.RuntimeMode != RuntimeAuto && payload.RuntimeMode != RuntimeFullAccess {
+			return fmt.Errorf("thread.runtime-mode.set requires a known mode: %w", ErrInvalidCommand)
 		}
 	case CommandProviderSwitch:
 		payload, ok := commandPayload[ProviderSwitch](command)

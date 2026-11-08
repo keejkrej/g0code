@@ -37,6 +37,7 @@ type acpSession struct {
 	mu        sync.Mutex
 	currentMu sync.RWMutex
 	current   *acpInvocation
+	broker    *requestBroker
 }
 
 type acpInvocation struct {
@@ -149,7 +150,7 @@ func (a *ACPAdapter) sessionFor(ctx context.Context, request RunRequest, emit Em
 	if len(args) == 0 {
 		args = []string{"acp"}
 	}
-	session := &acpSession{}
+	session := &acpSession{broker: newRequestBroker()}
 	client, err := startRPCClient(rpcClientOptions{Binary: binary, Args: args, Dir: request.Session.CWD,
 		OnNotification: func(raw json.RawMessage) {
 			session.currentMu.RLock()
@@ -159,10 +160,7 @@ func (a *ACPAdapter) sessionFor(ctx context.Context, request RunRequest, emit Em
 				_ = a.handleFrame(context.Background(), current.request, raw, current.emit)
 			}
 		}, OnRequest: func(_ context.Context, request rpcRequest) (any, *rpcError) {
-			if request.Method == "session/request_permission" {
-				return map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}, nil
-			}
-			return nil, &rpcError{Code: -32601, Message: "callback disabled by read-only g0code client"}
+			return a.handleNativeRequest(session, request)
 		}})
 	if err != nil {
 		return nil, err
@@ -243,6 +241,82 @@ func (a *ACPAdapter) sessionFor(ctx context.Context, request RunRequest, emit Em
 	return session, nil
 }
 
+func (a *ACPAdapter) handleNativeRequest(session *acpSession, request rpcRequest) (any, *rpcError) {
+	if request.Method != "session/request_permission" {
+		return nil, &rpcError{Code: -32601, Message: "unsupported ACP client callback: " + request.Method}
+	}
+	var payload struct {
+		ToolCall struct {
+			ToolCallID string `json:"toolCallId"`
+			Name       string `json:"name"`
+			Title      string `json:"title"`
+			RawInput   any    `json:"rawInput"`
+		} `json:"toolCall"`
+		Options []struct {
+			OptionID string `json:"optionId"`
+			Kind     string `json:"kind"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(request.Params, &payload); err != nil {
+		return nil, &rpcError{Code: -32602, Message: err.Error()}
+	}
+	session.currentMu.RLock()
+	invocation := session.current
+	session.currentMu.RUnlock()
+	if invocation == nil {
+		return nil, &rpcError{Code: -32000, Message: "ACP permission request has no active turn"}
+	}
+	kind := orchestration.RequestPermission
+	if payload.ToolCall.Name == "bash" || payload.ToolCall.Name == "execute" {
+		kind = orchestration.RequestCommand
+	} else if payload.ToolCall.Name == "read_file" {
+		kind = orchestration.RequestFileRead
+	} else if payload.ToolCall.Name == "write_file" || payload.ToolCall.Name == "edit" {
+		kind = orchestration.RequestFileChange
+	}
+	response, err := session.broker.ask(context.Background(), invocation.request, invocation.emit,
+		payload.ToolCall.ToolCallID, kind, payload.ToolCall.Title, payload.ToolCall.RawInput)
+	if err != nil {
+		return nil, &rpcError{Code: -32000, Message: err.Error()}
+	}
+	if response.Decision != nil && *response.Decision == "cancel" {
+		return map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}, nil
+	}
+	wanted := "allow_once"
+	if response.Decision != nil && (*response.Decision == "acceptForSession" || *response.Decision == "acceptAlways") {
+		wanted = "allow_always"
+	} else if response.Decision != nil && *response.Decision == "decline" {
+		wanted = "reject_once"
+	}
+	optionID := ""
+	for _, option := range payload.Options {
+		if option.Kind == wanted || option.OptionID == wanted {
+			optionID = option.OptionID
+			break
+		}
+	}
+	if optionID == "" && len(payload.Options) > 0 {
+		optionID = payload.Options[0].OptionID
+	}
+	return map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optionID}}, nil
+}
+
+func (a *ACPAdapter) RespondRuntimeRequest(_ context.Context, response orchestration.RuntimeRequestRespondEffect) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, session := range a.sessions {
+		if response.Request.NativeRequestRef != nil && response.Request.NativeRequestRef.NativeID != nil {
+			session.broker.mu.Lock()
+			_, ok := session.broker.pending[*response.Request.NativeRequestRef.NativeID]
+			session.broker.mu.Unlock()
+			if ok {
+				return session.broker.respond(response)
+			}
+		}
+	}
+	return fmt.Errorf("ACP runtime request is not live: %w", orchestration.ErrRequestNotRespondable)
+}
+
 // Interrupt matches ACP's native session/cancel notification.
 func (a *ACPAdapter) Interrupt(ctx context.Context, effect orchestration.TurnInterruptEffect) error {
 	a.mu.Lock()
@@ -266,6 +340,7 @@ func (a *ACPAdapter) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, session := range a.sessions {
+		session.broker.cancelAll()
 		_ = session.client.call(context.Background(), "session/close", map[string]any{"sessionId": session.nativeID}, nil)
 		session.client.close()
 	}
@@ -294,12 +369,15 @@ func (a *ACPAdapter) handleFrame(ctx context.Context, request RunRequest, raw js
 		Params struct {
 			SessionID string `json:"sessionId"`
 			Update    struct {
-				SessionUpdate string `json:"sessionUpdate"`
-				MessageID     string `json:"messageId"`
-				Content       struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
+				SessionUpdate string          `json:"sessionUpdate"`
+				MessageID     string          `json:"messageId"`
+				ToolCallID    string          `json:"toolCallId"`
+				Name          string          `json:"name"`
+				Title         string          `json:"title"`
+				Kind          string          `json:"kind"`
+				Status        string          `json:"status"`
+				RawInput      json.RawMessage `json:"rawInput"`
+				Content       json.RawMessage `json:"content"`
 			} `json:"update"`
 		} `json:"params"`
 		Result struct {
@@ -339,7 +417,30 @@ func (a *ACPAdapter) handleFrame(ctx context.Context, request RunRequest, raw js
 		return nil
 	}
 	update := frame.Params.Update
-	if update.Content.Type != "text" {
+	if update.SessionUpdate == "tool_call" || update.SessionUpdate == "tool_call_update" {
+		itemType := "dynamic_tool"
+		if update.Kind == "edit" {
+			itemType = "file_change"
+		} else if update.Kind == "execute" {
+			itemType = "command_execution"
+		}
+		status := orchestration.TurnItemStatus(update.Status)
+		if status == "" {
+			status = orchestration.TurnItemRunning
+		}
+		return emitToolCall(ctx, request, emit, ToolCall{ID: update.ToolCallID, Type: itemType,
+			Title: update.Title, Status: status, Input: update.RawInput, Output: update.Content}, raw)
+	}
+	var content struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if len(update.Content) > 0 {
+		if err := json.Unmarshal(update.Content, &content); err != nil {
+			return err
+		}
+	}
+	if content.Type != "text" {
 		return nil
 	}
 	switch update.SessionUpdate {
@@ -348,14 +449,14 @@ func (a *ACPAdapter) handleFrame(ctx context.Context, request RunRequest, raw js
 		if nativeItemID == "" {
 			nativeItemID = string(request.Start.Attempt.ID) + ":assistant"
 		}
-		state.assistantText[nativeItemID] += update.Content.Text
+		state.assistantText[nativeItemID] += content.Text
 		return emitAssistant(ctx, request, emit, nativeItemID, state.assistantText[nativeItemID], true, raw)
 	case "agent_thought_chunk":
 		nativeItemID := update.MessageID
 		if nativeItemID == "" {
 			nativeItemID = string(request.Start.Attempt.ID) + ":reasoning"
 		}
-		state.reasoningText[nativeItemID] += update.Content.Text
+		state.reasoningText[nativeItemID] += content.Text
 		item := orchestration.TurnItem{CreatedBy: orchestration.ActorAgent, CreationSource: orchestration.CreationProvider,
 			ID:       orchestration.DeriveTurnItemFromProviderItemID(a.Driver(), nativeItemID),
 			ThreadID: request.Start.Thread.ID, RunID: &request.Start.Run.ID, NodeID: request.Start.Run.RootNodeID,
