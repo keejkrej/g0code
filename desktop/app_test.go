@@ -69,7 +69,7 @@ func TestDesktopThreadPromptAndApproval(t *testing.T) {
 	workspace := t.TempDir()
 	app := New(o, executor, Config{ProjectID: "local", WorktreePath: &workspace, Provider: "codex"})
 	view := ui.NewTester(app.View, 1200, 760)
-	if !view.HasText("Create a thread") {
+	if !view.HasText("Work with your agents") {
 		t.Fatalf("empty state missing: %q", view.Texts())
 	}
 	if err := view.Click("New thread"); err != nil {
@@ -79,7 +79,7 @@ func TestDesktopThreadPromptAndApproval(t *testing.T) {
 		t.Fatal("new thread was not selected")
 	}
 	app.Draft = "Run the GUI test"
-	if err := view.Click("Send"); err != nil {
+	if err := view.Click("↑  Send"); err != nil {
 		t.Fatal(err)
 	}
 	waitForRunStatus(t, o, app.SelectedID, orchestration.RunCompleted)
@@ -114,7 +114,7 @@ func TestDesktopThreadPromptAndApproval(t *testing.T) {
 	}
 	_ = app.Refresh(ctx)
 	view.Frame()
-	if !view.HasText("Pending requests") {
+	if !view.HasText("Approval needed") {
 		t.Fatalf("pending request UI missing: %q", view.Texts())
 	}
 	if err := view.Click("Allow"); err != nil {
@@ -124,6 +124,52 @@ func TestDesktopThreadPromptAndApproval(t *testing.T) {
 	resolved, _ := snapshot.Projection.RuntimeRequest(request.ID)
 	if resolved.Status != orchestration.RequestResolved {
 		t.Fatalf("request not resolved: %+v", resolved)
+	}
+}
+
+func TestDesktopThreePaneToolDetails(t *testing.T) {
+	ctx := context.Background()
+	o := orchestration.New(nil)
+	executor := &fakeExecutor{orchestrator: o, release: make(chan struct{})}
+	workspace := t.TempDir()
+	app := New(o, executor, Config{ProjectID: "local", WorktreePath: &workspace, Provider: "codex"})
+	view := ui.NewTester(app.View, 1200, 760)
+	if _, err := app.NewThread(ctx); err != nil {
+		t.Fatal(err)
+	}
+	app.Draft = "Edit a file"
+	view.Frame()
+	if err := view.Click("↑  Send"); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunStatus(t, o, app.SelectedID, orchestration.RunCompleted)
+	snapshot, _ := o.Snapshot(ctx, app.SelectedID)
+	item := orchestration.TurnItem{CreatedBy: orchestration.ActorAgent, CreationSource: orchestration.CreationProvider,
+		ID: "tool-file-1", ThreadID: app.SelectedID, RunID: &snapshot.Projection.Runs[0].ID,
+		NodeID: snapshot.Projection.Runs[0].RootNodeID, ProviderTurnID: &snapshot.Projection.ProviderTurns[0].ID,
+		Status: orchestration.TurnItemCompleted, Type: "file_change", Title: "result.txt",
+		Data: map[string]any{"fileName": "result.txt", "diffStr": "+GUI_OK\n"}, UpdatedAt: time.Now().UTC()}
+	if _, err := o.Ingest(ctx, orchestration.IngestInput{ThreadID: app.SelectedID, ProviderInstanceID: "codex",
+		Event: orchestration.ProviderEvent{Type: orchestration.ProviderEventTurnItemUpdated, TurnItem: &item}}); err != nil {
+		t.Fatal(err)
+	}
+	app.SelectItem(item.ID)
+	if err := app.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	view.Frame()
+	if !view.HasText("1 changed file") || !view.HasText("result.txt") || !view.HasText("+GUI_OK") {
+		t.Fatalf("three-pane file details missing: %q", view.Texts())
+	}
+	if path := os.Getenv("G0CODE_CAPTURE_DETAILS"); path != "" {
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := png.Encode(file, view.Image()); err != nil {
+			t.Fatal(err)
+		}
+		_ = file.Close()
 	}
 }
 

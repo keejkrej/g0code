@@ -67,6 +67,47 @@ func TestNativeTransportMatchesT3CodeSimpleFixture(t *testing.T) {
 	}
 }
 
+func TestNativeProviderDiscoveryWithPackagedPATH(t *testing.T) {
+	fixture, err := filepath.Abs(filepath.Join("testdata", "t3code-v0.1.7", "simple", "codex_transcript.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	providerPath := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(providerPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := nativeHelperBinary(t, fixture, "codex")
+	content, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(providerPath, "codex"), content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	ctx := context.Background()
+	store := orchestration.NewMemoryStore()
+	o := orchestration.New(store)
+	executor := NewExecutor(o)
+	executor.Register("codex", &CodexAdapter{Binary: "codex"})
+	defer executor.Close()
+	threadID := orchestration.ThreadID("packaged-path")
+	workspace := t.TempDir()
+	dispatch(t, o, orchestration.Command{Type: orchestration.CommandThreadCreate, CommandID: "create", ThreadID: threadID,
+		Payload: orchestration.CreateThread{ProjectID: "project", Title: "Packaged PATH", WorktreePath: &workspace,
+			ModelSelection: orchestration.ModelSelection{InstanceID: "codex", Model: "gpt-6-luna"},
+			RuntimeMode:    orchestration.RuntimeFullAccess, InteractionMode: orchestration.InteractionDefault}})
+	result := dispatch(t, o, orchestration.Command{Type: orchestration.CommandMessageDispatch, CommandID: "message", ThreadID: threadID,
+		Payload: orchestration.DispatchMessage{MessageID: "user-message", Text: "Respond with the following text: fixture simple ok",
+			DispatchMode: orchestration.DispatchMode{Type: orchestration.DispatchStartImmediately}}})
+	if err := executor.Execute(ctx, result.Effects[0]); err != nil {
+		t.Fatalf("provider discovery failed: %v", err)
+	}
+	assertSimpleProjectionParity(t, o, store, threadID)
+}
+
 func TestClaudeUsesStreamingSDKQueryTransport(t *testing.T) {
 	fixture, err := filepath.Abs(filepath.Join("testdata", "t3code-v0.1.7", "simple", "claude_transcript.ndjson"))
 	if err != nil {

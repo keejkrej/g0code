@@ -33,7 +33,7 @@ func TestLiveDesktopWorkspaceEdit(t *testing.T) {
 	}
 	app.Draft = "Create result.txt containing exactly G0CODE_DESKTOP_OK, then read it with a local shell command. Do not use network or MCP."
 	view.Frame()
-	if err := view.Click("Send"); err != nil {
+	if err := view.Click("↑  Send"); err != nil {
 		t.Fatal(err)
 	}
 	for {

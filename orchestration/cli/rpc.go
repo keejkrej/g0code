@@ -59,11 +59,13 @@ type rpcClient struct {
 }
 
 func startRPCClient(options rpcClientOptions) (*rpcClient, error) {
-	command := exec.Command(options.Binary, options.Args...)
-	command.Dir = options.Dir
-	if options.Env != nil {
-		command.Env = options.Env
+	binary, err := resolveProviderBinary(options.Binary, options.Binary)
+	if err != nil {
+		return nil, err
 	}
+	command := exec.Command(binary, options.Args...)
+	command.Dir = options.Dir
+	command.Env = nativeEnvironment(options.Env)
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return nil, err

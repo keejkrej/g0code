@@ -5,12 +5,14 @@ The native desktop app uses MyGo `v0.8.3`, with Go `1.27.3` and the MyGo CLI pin
 ## Features
 
 - Durable local thread list and selection.
+- T3-style sidebar, conversation/tool timeline, resizable file/diff pane, and rounded composer.
 - Message/run timeline with tool activity and delegated child links.
 - Codex, Claude, Pi, Agy, and Fx provider selection.
 - Approval-required, auto-accept-edits, auto, and explicit full-access modes.
 - Parent/child pending-request controls.
 - Delegation, native interruption, and child result publication.
 - Shared SQLite state and leased outbox worker with heartbeat renewal.
+- Packaged-app provider discovery across login-shell PATH, `~/.local/bin`, Homebrew, mise, and Pi installation paths.
 
 ## Develop and build
 
