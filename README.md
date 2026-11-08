@@ -38,6 +38,7 @@ Implemented in this first vertical slice:
 - Lazy thread forks with native-fork selection when capabilities/refs allow it, otherwise an auditable portable handoff.
 - Provider switching with durable full/delta context handoff artifacts.
 - A concurrency-safe in-memory `Store` adapter for development and replay tests.
+- Durable SQLite events, receipts, and leased effect outbox with restart/recovery tests.
 - Read-only local CLI adapters for Codex, Claude Code, Pi, Agy (ACP), and Fx (ACP), with fixture-backed parity and opt-in live integration tests. See `orchestration/cli/README.md`.
 
 ### Public seams
@@ -49,7 +50,7 @@ Implemented in this first vertical slice:
 - `ProviderResolver`: maps provider instances to drivers and capabilities.
 - `Apply` / `Replay`: deterministic projection verification.
 
-Provider effects are returned **only for a newly committed command**, not for receipt replays. Effect IDs are deterministic for executor deduplication. The in-memory adapter does not persist effects; before using this in production, add the durable effect outbox described by t3code's v2 docs or an equivalent committed handoff to the effect worker.
+Provider effects are returned **only for a newly committed command**, not for receipt replays. Effect IDs are deterministic for executor deduplication. SQLite commits enqueue effects in the same transaction as domain events; the effect worker uses at-least-once leased execution and lease-expiry recovery.
 
 ### Not ported yet
 
@@ -57,7 +58,7 @@ This is not yet the whole t3code server. The following remain separate adapters 
 
 - Rich provider tool calls, approvals, subagent execution, active steering, and long-lived native provider sessions.
 - Additional provider adapters beyond the initial Codex/Claude/Pi/Agy/Fx slice.
-- SQLite repositories/migrations, websocket transport, and snapshot pagination.
+- Websocket transport, snapshot pagination, and durable projection tables.
 - Filesystem checkpoint capture/restore and rollback execution.
 - Delegated-task delivery, remote links, PR watchers, title generation, usage-limit recovery, and background-work reactors.
 - The MyGo application, bound services, generated TypeScript client, and frontend.

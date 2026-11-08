@@ -64,4 +64,4 @@ A successful live case checks exact assistant text, native resume refs, two dist
 - Text and reasoning normalization only; no tool-call or approval execution yet.
 - Interrupt uses Codex `turn/interrupt`, Claude SDK control requests, Pi `abort`, and ACP `session/cancel`.
 - Provider model value `default` uses the CLI's configured model. Other values are passed through to the CLI.
-- Effects are executed by the caller. Production crash recovery still requires the orchestration durable outbox.
+- Effects use the orchestration durable outbox with at-least-once execution and lease recovery.

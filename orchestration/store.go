@@ -31,6 +31,7 @@ type CommitInput struct {
 	ExpectedSequence  uint64
 	ExpectedSequences map[ThreadID]uint64 // Additional aggregates in an atomic command.
 	Events            []Event
+	Effects           []Effect
 	Receipt           *Receipt
 	CommandID         *CommandID // Optional correlation for provider-ingested events.
 }

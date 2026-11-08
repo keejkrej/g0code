@@ -175,7 +175,7 @@ func (o *Orchestrator) Dispatch(ctx context.Context, command Command) (DispatchR
 	}
 	committed, err := o.store.Commit(ctx, CommitInput{
 		ThreadID: command.ThreadID, ExpectedSequence: snapshot.SnapshotSequence,
-		Events: plan.events, Receipt: &receipt, ExpectedSequences: plan.expectedSequences,
+		Events: plan.events, Effects: plan.effects, Receipt: &receipt, ExpectedSequences: plan.expectedSequences,
 	})
 	if err != nil {
 		return DispatchResult{}, commandError(command, err, "commit command")
