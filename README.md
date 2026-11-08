@@ -40,6 +40,7 @@ Implemented in this first vertical slice:
 - A concurrency-safe in-memory `Store` adapter for development and replay tests.
 - Durable SQLite events, receipts, and leased effect outbox with restart/recovery tests.
 - Read-only local CLI adapters for Codex, Claude Code, Pi, Agy (ACP), and Fx (ACP), with fixture-backed parity and opt-in live integration tests. See `orchestration/cli/README.md`.
+- A native MyGo desktop MVP with local threads, coding tools, delegation, approvals, and interruption. See `desktop/README.md`.
 
 ### Public seams
 
@@ -56,12 +57,11 @@ Provider effects are returned **only for a newly committed command**, not for re
 
 This is not yet the whole t3code server. The following remain separate adapters or later domain slices:
 
-- Rich provider tool calls, approvals, subagent execution, active steering, and long-lived native provider sessions.
+- Complete provider-specific tool surfaces, active steering/restart, native subagent execution, and background-work reactors.
 - Additional provider adapters beyond the initial Codex/Claude/Pi/Agy/Fx slice.
 - Websocket transport, snapshot pagination, and durable projection tables.
 - Filesystem checkpoint capture/restore and rollback execution.
-- Delegated-task delivery, remote links, PR watchers, title generation, usage-limit recovery, and background-work reactors.
-- The MyGo application, bound services, generated TypeScript client, and frontend.
+- Delegated-task wake delivery, remote links, PR watchers, title generation, and usage-limit recovery.
 
 ## MCP server
 

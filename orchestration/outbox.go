@@ -31,6 +31,7 @@ type OutboxEffect struct {
 type OutboxStore interface {
 	ClaimEffects(context.Context, string, int, time.Duration) ([]OutboxEffect, error)
 	CompleteEffect(context.Context, string, string, error) error
+	RenewEffect(context.Context, string, string, time.Duration) (bool, error)
 	ListEffects(context.Context) ([]OutboxEffect, error)
 }
 
@@ -64,12 +65,58 @@ func (w *EffectWorker) RunOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for _, claimedEffect := range claimed {
-		executionErr := w.Executor.Execute(ctx, claimedEffect.Effect)
+		executionErr := w.executeWithLease(ctx, claimedEffect)
 		if err := w.Store.CompleteEffect(context.WithoutCancel(ctx), claimedEffect.Effect.ID, w.WorkerID, executionErr); err != nil {
 			return len(claimed), err
 		}
 	}
 	return len(claimed), nil
+}
+
+func (w *EffectWorker) executeWithLease(ctx context.Context, claimed OutboxEffect) error {
+	lease := w.Lease
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	execCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	heartbeatErr := make(chan error, 1)
+	go func() {
+		interval := lease / 3
+		if interval <= 0 {
+			interval = time.Millisecond
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-execCtx.Done():
+				return
+			case <-ticker.C:
+				renewed, err := w.Store.RenewEffect(execCtx, claimed.Effect.ID, w.WorkerID, lease)
+				if err != nil {
+					heartbeatErr <- err
+					cancel()
+					return
+				}
+				if !renewed {
+					heartbeatErr <- fmt.Errorf("effect %s lost its worker lease", claimed.Effect.ID)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	executionErr := w.Executor.Execute(execCtx, claimed.Effect)
+	cancel()
+	select {
+	case err := <-heartbeatErr:
+		if executionErr == nil {
+			executionErr = err
+		}
+	default:
+	}
+	return executionErr
 }
 
 func (w *EffectWorker) Run(ctx context.Context) error {

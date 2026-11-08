@@ -28,6 +28,7 @@ type codexSession struct {
 	byTurn       map[orchestration.ProviderTurnID]*codexInvocation
 	knownThreads map[string]bool
 	threadModels map[string]string
+	broker       *requestBroker
 }
 
 type codexInvocation struct {
@@ -114,12 +115,12 @@ func (a *CodexAdapter) sessionFor(ctx context.Context, request RunRequest, emit 
 		args := append([]string{"app-server"}, a.Args...)
 		session = &codexSession{byThread: make(map[string]*codexInvocation),
 			byTurn: make(map[orchestration.ProviderTurnID]*codexInvocation), knownThreads: make(map[string]bool),
-			threadModels: make(map[string]string)}
+			threadModels: make(map[string]string), broker: newRequestBroker()}
 		client, err := startRPCClient(rpcClientOptions{Binary: binary, Args: args, Dir: request.Session.CWD,
 			Env:            append(os.Environ(), "CODEX_INTERNAL_ORIGINATOR_OVERRIDE=T3 Code"),
 			OnNotification: func(raw json.RawMessage) { a.handleNotification(session, raw) },
 			OnRequest: func(_ context.Context, request rpcRequest) (any, *rpcError) {
-				return map[string]any{"decision": "decline"}, nil
+				return a.handleNativeRequest(session, request)
 			}})
 		if err != nil {
 			return nil, "", "", err
@@ -278,6 +279,61 @@ func codexTurnStartParams(request RunRequest, nativeThreadID, model string) map[
 	}
 }
 
+func (a *CodexAdapter) handleNativeRequest(session *codexSession, request rpcRequest) (any, *rpcError) {
+	var payload struct {
+		ThreadID string `json:"threadId"`
+		ItemID   string `json:"itemId"`
+		Command  string `json:"command"`
+		CWD      string `json:"cwd"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(request.Params, &payload); err != nil {
+		return nil, &rpcError{Code: -32602, Message: err.Error()}
+	}
+	session.runsMu.RLock()
+	invocation := session.byThread[payload.ThreadID]
+	session.runsMu.RUnlock()
+	if invocation == nil {
+		return nil, &rpcError{Code: -32601, Message: "unknown Codex approval thread"}
+	}
+	kind := orchestration.RequestCommand
+	if strings.Contains(request.Method, "fileChange") {
+		kind = orchestration.RequestFileChange
+	}
+	response, err := session.broker.ask(context.Background(), invocation.request, invocation.emit,
+		normalizeRPCID(request.ID), kind, "Codex approval", map[string]any{"itemId": payload.ItemID,
+			"command": payload.Command, "cwd": payload.CWD, "reason": payload.Reason})
+	if err != nil {
+		return nil, &rpcError{Code: -32000, Message: err.Error()}
+	}
+	decision := "decline"
+	if response.Decision != nil {
+		switch *response.Decision {
+		case "accept", "acceptForSession", "acceptAlways":
+			decision = *response.Decision
+		case "cancel":
+			decision = "cancel"
+		}
+	}
+	return map[string]any{"decision": decision}, nil
+}
+
+func (a *CodexAdapter) RespondRuntimeRequest(_ context.Context, response orchestration.RuntimeRequestRespondEffect) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, session := range a.sessions {
+		if response.Request.NativeRequestRef != nil && response.Request.NativeRequestRef.NativeID != nil {
+			session.broker.mu.Lock()
+			_, ok := session.broker.pending[*response.Request.NativeRequestRef.NativeID]
+			session.broker.mu.Unlock()
+			if ok {
+				return session.broker.respond(response)
+			}
+		}
+	}
+	return fmt.Errorf("Codex runtime request is not live: %w", orchestration.ErrRequestNotRespondable)
+}
+
 func (a *CodexAdapter) Interrupt(ctx context.Context, effect orchestration.TurnInterruptEffect) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -303,6 +359,7 @@ func (a *CodexAdapter) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, session := range a.sessions {
+		session.broker.cancelAll()
 		session.client.close()
 	}
 	a.sessions = nil
@@ -329,9 +386,18 @@ type codexFrame struct {
 			} `json:"error"`
 		} `json:"turn"`
 		Item struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
-			Text string `json:"text"`
+			ID               string `json:"id"`
+			Type             string `json:"type"`
+			Text             string `json:"text"`
+			Command          string `json:"command"`
+			CWD              string `json:"cwd"`
+			ExitCode         *int   `json:"exitCode"`
+			Output           string `json:"output"`
+			AggregatedOutput string `json:"aggregatedOutput"`
+			Changes          []struct {
+				Path string `json:"path"`
+				Diff string `json:"diff"`
+			} `json:"changes"`
 		} `json:"item"`
 		TokenUsage struct {
 			Last struct {
@@ -353,9 +419,18 @@ type codexFrame struct {
 		} `json:"turn"`
 	} `json:"result"`
 	Item struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-		Text string `json:"text"`
+		ID               string `json:"id"`
+		Type             string `json:"type"`
+		Text             string `json:"text"`
+		Command          string `json:"command"`
+		CWD              string `json:"cwd"`
+		ExitCode         *int   `json:"exitCode"`
+		Output           string `json:"output"`
+		AggregatedOutput string `json:"aggregatedOutput"`
+		Changes          []struct {
+			Path string `json:"path"`
+			Diff string `json:"diff"`
+		} `json:"changes"`
 	} `json:"item"`
 	Usage struct {
 		InputTokens           int `json:"input_tokens"`
@@ -406,6 +481,39 @@ func (a *CodexAdapter) handleFrame(ctx context.Context, request RunRequest, raw 
 	item := frame.Item
 	if frame.Params.Item.ID != "" {
 		item = frame.Params.Item
+	}
+	if item.ID != "" && (item.Type == "commandExecution" || item.Type == "fileChange") {
+		status := orchestration.TurnItemRunning
+		if frame.Method == "item/completed" {
+			status = orchestration.TurnItemCompleted
+		}
+		if frame.Method == "item/failed" {
+			status = orchestration.TurnItemFailed
+		}
+		if status == orchestration.TurnItemCompleted && item.ExitCode != nil && *item.ExitCode != 0 {
+			status = orchestration.TurnItemFailed
+		}
+		itemTypeName := "command_execution"
+		if item.Type == "fileChange" {
+			itemTypeName = "file_change"
+		}
+		output := item.Output
+		if output == "" {
+			output = item.AggregatedOutput
+		}
+		fileName := ""
+		diff := ""
+		for _, change := range item.Changes {
+			if fileName == "" {
+				fileName = change.Path
+			}
+			diff += change.Diff
+		}
+		if err := emitToolCall(ctx, request, emit, ToolCall{ID: item.ID, Type: itemTypeName,
+			Title: item.Command, Status: status, Input: map[string]any{"command": item.Command, "cwd": item.CWD},
+			Output: output, ExitCode: item.ExitCode, FileName: fileName, Diff: diff}, raw); err != nil {
+			return err
+		}
 	}
 	if item.ID != "" && (item.Type == "agent_message" || item.Type == "agentMessage") && item.Text != "" {
 		if err := emitAssistant(ctx, request, emit, item.ID, item.Text, false, raw); err != nil {

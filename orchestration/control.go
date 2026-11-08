@@ -78,6 +78,21 @@ func (o *Orchestrator) planRuntimeRequestRespond(plan *commandPlan) error {
 			return err
 		}
 	}
+	for _, item := range plan.projection.TurnItems {
+		if item.RequestID != request.ID {
+			continue
+		}
+		item.Status = TurnItemCompleted
+		if command.Decision != nil && (*command.Decision == "decline" || *command.Decision == "cancel") {
+			item.Status = TurnItemDeclined
+		}
+		item.CompletedAt = &plan.now
+		item.UpdatedAt = plan.now
+		if _, err := plan.emitAndApply(eventSpec{eventType: EventTurnItemUpdated, threadID: item.ThreadID,
+			runID: item.RunID, nodeID: item.NodeID, payload: item}); err != nil {
+			return err
+		}
+	}
 	plan.effect(EffectProviderRuntimeRequestRespond,
 		fmt.Sprintf("effect:%s:provider-runtime-request.respond:%s", plan.command.CommandID, request.ID),
 		RuntimeRequestRespondEffect{Request: request, Response: command})

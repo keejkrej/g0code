@@ -12,7 +12,7 @@ Dispatch
   -> completed/failed/interrupted run projection
 ```
 
-The first adapter slice is intentionally **read-only and text-only**. Codex uses a persistent `codex app-server` JSON-RPC session, Claude Code uses the streaming Agent SDK query protocol (`stream-json` input and output), Pi uses a persistent `pi --mode rpc` session, and Agy/Fx use managed ACP sessions over stdio. Agy and Fx share the ACP transport and normalizer.
+The adapters support native coding tools and supervised runtime approvals in addition to text turns. Codex uses a persistent `codex app-server` JSON-RPC session, Claude Code uses the streaming Agent SDK query protocol (`stream-json` input and output), Pi uses a persistent `pi --mode rpc` session with a blocking permission extension, and Agy/Fx use managed ACP sessions over stdio. Agy and Fx share the ACP transport and normalizer.
 
 ## Fixture-backed parity
 
@@ -61,7 +61,7 @@ A successful live case checks exact assistant text, native resume refs, two dist
 ## Current adapter limits
 
 - Persistent native sessions with native resume refs and provider-specific control operations.
-- Text and reasoning normalization only; no tool-call or approval execution yet.
+- Text, reasoning, command, file-change, and dynamic-tool normalization; richer provider-specific items remain follow-up work.
 - Interrupt uses Codex `turn/interrupt`, Claude SDK control requests, Pi `abort`, and ACP `session/cancel`.
 - Provider model value `default` uses the CLI's configured model. Other values are passed through to the CLI.
 - Effects use the orchestration durable outbox with at-least-once execution and lease recovery.

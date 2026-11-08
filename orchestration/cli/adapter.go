@@ -24,6 +24,7 @@ type RunRequest struct {
 	Session        *orchestration.ProviderSession
 	ProviderThread *orchestration.ProviderThread
 	ProviderTurn   *orchestration.ProviderTurn
+	ToolTypes      map[string]string
 	StateMu        *sync.Mutex
 }
 
@@ -73,6 +74,10 @@ type interruptAdapter interface {
 
 type closeAdapter interface {
 	Close() error
+}
+
+type runtimeRequestResponder interface {
+	RespondRuntimeRequest(context.Context, orchestration.RuntimeRequestRespondEffect) error
 }
 
 type activeTurn struct {
@@ -153,6 +158,24 @@ func (e *Executor) Execute(ctx context.Context, effect orchestration.Effect) err
 		}
 		active.cancel()
 		return nil
+	case orchestration.EffectProviderRuntimeRequestRespond:
+		response, ok := effectPayload[orchestration.RuntimeRequestRespondEffect](effect.Payload)
+		if !ok {
+			return fmt.Errorf("provider.runtime-request.respond payload is %T", effect.Payload)
+		}
+		if response.Request.ProviderTurnID == nil {
+			return fmt.Errorf("runtime request has no provider turn: %w", orchestration.ErrRequestNotRespondable)
+		}
+		e.mu.Lock()
+		active := e.active[*response.Request.ProviderTurnID]
+		e.mu.Unlock()
+		if active.adapter == nil {
+			return fmt.Errorf("provider turn is not active: %w", orchestration.ErrRequestNotRespondable)
+		}
+		if adapter, ok := active.adapter.(runtimeRequestResponder); ok {
+			return adapter.RespondRuntimeRequest(ctx, response)
+		}
+		return fmt.Errorf("provider cannot respond to runtime request: %w", orchestration.ErrUnsupportedCapability)
 	default:
 		return fmt.Errorf("effect %s is not supported by the CLI executor: %w", effect.Kind, orchestration.ErrUnsupportedCapability)
 	}
@@ -200,7 +223,7 @@ func (e *Executor) startTurn(ctx context.Context, effect orchestration.Effect, s
 	turn := orchestration.ProviderTurn{ID: turnID, ProviderThreadID: providerThread.ID,
 		NodeID: *start.Run.RootNodeID, RunAttemptID: &start.Attempt.ID, Ordinal: 1, Status: orchestration.ProviderTurnRunning}
 	request := RunRequest{Start: start, Session: &session, ProviderThread: &providerThread, ProviderTurn: &turn,
-		StateMu: &sync.Mutex{}}
+		ToolTypes: make(map[string]string), StateMu: &sync.Mutex{}}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	e.mu.Lock()

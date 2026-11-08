@@ -212,6 +212,8 @@ func (o *Orchestrator) plan(ctx context.Context, plan *commandPlan) error {
 		return o.planQueueResume(plan)
 	case CommandProviderSwitch:
 		return o.planProviderSwitch(plan)
+	case CommandThreadRuntimeModeSet:
+		return o.planRuntimeModeChange(plan)
 	case CommandThreadArchive, CommandThreadUnarchive, CommandThreadDelete:
 		return o.planThreadLifecycle(plan)
 	default:
@@ -301,6 +303,19 @@ func (o *Orchestrator) planThreadLifecycle(plan *commandPlan) error {
 	}
 	thread.UpdatedAt = plan.now
 	_, err := plan.emit(eventSpec{eventType: eventType, threadID: thread.ID,
+		instanceID: thread.ProviderInstanceID, payload: thread})
+	return err
+}
+
+func (o *Orchestrator) planRuntimeModeChange(plan *commandPlan) error {
+	command, _ := commandPayload[RuntimeModeChange](plan.command)
+	thread := plan.projection.Thread
+	if thread.RuntimeMode == command.RuntimeMode {
+		return fmt.Errorf("runtime mode is unchanged: %w", ErrCommandRejected)
+	}
+	thread.RuntimeMode = command.RuntimeMode
+	thread.UpdatedAt = plan.now
+	_, err := plan.emit(eventSpec{eventType: EventThreadRuntimeModeUpdated, threadID: thread.ID,
 		instanceID: thread.ProviderInstanceID, payload: thread})
 	return err
 }

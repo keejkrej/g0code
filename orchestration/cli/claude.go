@@ -20,12 +20,14 @@ type ClaudeAdapter struct {
 }
 
 type claudeSession struct {
-	client    *rpcClient
-	nativeID  string
-	mu        sync.Mutex
-	currentMu sync.RWMutex
-	current   *claudeInvocation
-	model     string
+	client         *rpcClient
+	nativeID       string
+	mu             sync.Mutex
+	currentMu      sync.RWMutex
+	current        *claudeInvocation
+	model          string
+	broker         *requestBroker
+	permissionMode string
 }
 
 type claudeInvocation struct {
@@ -48,6 +50,17 @@ func (a *ClaudeAdapter) Capabilities() orchestration.ProviderCapabilities {
 	}
 }
 
+func claudePermissionMode(mode orchestration.RuntimeMode) string {
+	switch mode {
+	case orchestration.RuntimeAutoAcceptEdits:
+		return "acceptEdits"
+	case orchestration.RuntimeAuto, orchestration.RuntimeFullAccess:
+		return "auto"
+	default:
+		return "manual"
+	}
+}
+
 func (a *ClaudeAdapter) Run(ctx context.Context, request RunRequest, emit EmitFunc) error {
 	session, err := a.sessionFor(ctx, request)
 	if err != nil {
@@ -55,6 +68,13 @@ func (a *ClaudeAdapter) Run(ctx context.Context, request RunRequest, emit EmitFu
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	permissionMode := claudePermissionMode(request.Start.Thread.RuntimeMode)
+	if permissionMode != session.permissionMode {
+		if err := session.client.controlRequest(ctx, map[string]any{"subtype": "set_permission_mode", "mode": permissionMode}); err != nil {
+			return err
+		}
+		session.permissionMode = permissionMode
+	}
 	model := request.Start.Run.ModelSelection.Model
 	if model != "" && model != "default" && model != session.model {
 		if err := session.client.controlRequest(ctx, map[string]any{"subtype": "set_model", "model": model}); err != nil {
@@ -100,9 +120,10 @@ func (a *ClaudeAdapter) sessionFor(ctx context.Context, request RunRequest) (*cl
 	if binary == "" {
 		binary = "claude"
 	}
+	permissionMode := claudePermissionMode(request.Start.Thread.RuntimeMode)
 	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-		"--safe-mode", "--restricted", "--tools", "", "--permission-mode", "plan",
-		"--permission-prompts", "none", "--strict-mcp-config"}
+		"--safe-mode", "--restricted", "--permission-mode", permissionMode,
+		"--permission-prompts", "host", "--strict-mcp-config"}
 	nativeID := ""
 	if request.ProviderThread.NativeThreadRef != nil && request.ProviderThread.NativeThreadRef.NativeID != nil {
 		nativeID = *request.ProviderThread.NativeThreadRef.NativeID
@@ -111,9 +132,13 @@ func (a *ClaudeAdapter) sessionFor(ctx context.Context, request RunRequest) (*cl
 		nativeID = newUUID()
 		args = append(args, "--session-id", nativeID)
 	}
-	session := &claudeSession{nativeID: nativeID, model: request.Start.Run.ModelSelection.Model}
+	session := &claudeSession{nativeID: nativeID, model: request.Start.Run.ModelSelection.Model,
+		broker: newRequestBroker(), permissionMode: permissionMode}
 	client, err := startRPCClient(rpcClientOptions{Binary: binary, Args: args, Dir: request.Session.CWD,
-		OnNotification: func(raw json.RawMessage) { a.handleNotification(session, raw) }})
+		OnNotification: func(raw json.RawMessage) { a.handleNotification(session, raw) },
+		OnRequest: func(_ context.Context, request rpcRequest) (any, *rpcError) {
+			return a.handleNativeRequest(session, request)
+		}})
 	if err != nil {
 		return nil, err
 	}
@@ -144,11 +169,6 @@ func (a *ClaudeAdapter) handleNotification(session *claudeSession, raw json.RawM
 	if json.Unmarshal(raw, &frame) != nil {
 		return
 	}
-	if frame.Type == "control_request" {
-		_ = session.client.sendRecord(map[string]any{"type": "control_response",
-			"response": map[string]any{"request_id": frame.RequestID, "subtype": "error", "error": "control callback disabled by read-only g0code client"}})
-		return
-	}
 	if frame.Type == "result" && (frame.StopReason == "interrupted" || frame.TerminalReason == "interrupted") {
 		invocation.request.setTurnStatus(orchestration.ProviderTurnInterrupted)
 	}
@@ -162,6 +182,59 @@ func (a *ClaudeAdapter) handleNotification(session *claudeSession, raw json.RawM
 	if frame.Type == "result" {
 		invocation.finishOnce.Do(func() { close(invocation.done) })
 	}
+}
+
+func (a *ClaudeAdapter) handleNativeRequest(session *claudeSession, request rpcRequest) (any, *rpcError) {
+	var frame struct {
+		Request struct {
+			Subtype  string          `json:"subtype"`
+			ToolName string          `json:"tool_name"`
+			Input    json.RawMessage `json:"input"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(request.Raw, &frame); err != nil || frame.Request.Subtype != "can_use_tool" {
+		return nil, &rpcError{Code: -32601, Message: "unsupported Claude control request"}
+	}
+	kind := orchestration.RequestPermission
+	switch frame.Request.ToolName {
+	case "Bash", "PowerShell":
+		kind = orchestration.RequestCommand
+	case "Read":
+		kind = orchestration.RequestFileRead
+	case "Edit", "Write", "NotebookEdit":
+		kind = orchestration.RequestFileChange
+	}
+	session.currentMu.RLock()
+	invocation := session.current
+	session.currentMu.RUnlock()
+	if invocation == nil {
+		return nil, &rpcError{Code: -32000, Message: "Claude permission request has no active turn"}
+	}
+	response, err := session.broker.ask(context.Background(), invocation.request, invocation.emit,
+		normalizeRPCID(request.RequestID), kind, "Allow "+frame.Request.ToolName+"?", frame.Request.Input)
+	if err != nil {
+		return nil, &rpcError{Code: -32000, Message: err.Error()}
+	}
+	if response.Decision != nil && (*response.Decision == "accept" || *response.Decision == "acceptForSession" || *response.Decision == "acceptAlways") {
+		return map[string]any{"behavior": "allow"}, nil
+	}
+	return map[string]any{"behavior": "deny", "message": "Denied in g0code"}, nil
+}
+
+func (a *ClaudeAdapter) RespondRuntimeRequest(_ context.Context, response orchestration.RuntimeRequestRespondEffect) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, session := range a.sessions {
+		if response.Request.NativeRequestRef != nil && response.Request.NativeRequestRef.NativeID != nil {
+			session.broker.mu.Lock()
+			_, ok := session.broker.pending[*response.Request.NativeRequestRef.NativeID]
+			session.broker.mu.Unlock()
+			if ok {
+				return session.broker.respond(response)
+			}
+		}
+	}
+	return fmt.Errorf("Claude runtime request is not live: %w", orchestration.ErrRequestNotRespondable)
 }
 
 func (a *ClaudeAdapter) Interrupt(ctx context.Context, effect orchestration.TurnInterruptEffect) error {
@@ -182,6 +255,7 @@ func (a *ClaudeAdapter) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, session := range a.sessions {
+		session.broker.cancelAll()
 		session.client.close()
 	}
 	a.sessions = nil
@@ -205,8 +279,14 @@ type claudeFrame struct {
 		ID      string `json:"id"`
 		Role    string `json:"role"`
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			ToolUseID string          `json:"tool_use_id"`
+			Input     json.RawMessage `json:"input"`
+			Content   json.RawMessage `json:"content"`
+			IsError   bool            `json:"is_error"`
 		} `json:"content"`
 	} `json:"message"`
 	RateLimitInfo struct {
@@ -248,6 +328,33 @@ func (a *ClaudeAdapter) handleFrame(ctx context.Context, request RunRequest, raw
 		for _, content := range frame.Message.Content {
 			if content.Type == "text" {
 				text += content.Text
+			}
+			if content.Type == "tool_use" && content.ID != "" {
+				itemType := "dynamic_tool"
+				if content.Name == "Bash" || content.Name == "PowerShell" {
+					itemType = "command_execution"
+				} else if content.Name == "Edit" || content.Name == "Write" {
+					itemType = "file_change"
+				}
+				request.ToolTypes[content.ID] = itemType
+				if err := emitToolCall(ctx, request, emit, ToolCall{ID: content.ID, Type: itemType,
+					Title: content.Name, Status: orchestration.TurnItemRunning, Input: content.Input}, raw); err != nil {
+					return err
+				}
+			}
+			if content.Type == "tool_result" && content.ToolUseID != "" {
+				status := orchestration.TurnItemCompleted
+				if content.IsError {
+					status = orchestration.TurnItemFailed
+				}
+				itemType := request.ToolTypes[content.ToolUseID]
+				if itemType == "" {
+					itemType = "dynamic_tool"
+				}
+				if err := emitToolCall(ctx, request, emit, ToolCall{ID: content.ToolUseID, Type: itemType,
+					Status: status, Output: content.Content}, raw); err != nil {
+					return err
+				}
 			}
 		}
 		if text != "" {

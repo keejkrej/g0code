@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,8 @@ type piSession struct {
 	current     *piInvocation
 	model       string
 	sessionName string
+	runtimeMode orchestration.RuntimeMode
+	broker      *requestBroker
 }
 
 type piInvocation struct {
@@ -103,19 +106,30 @@ func (a *PiAdapter) sessionFor(ctx context.Context, request RunRequest, emit Emi
 		a.sessions = make(map[orchestration.ProviderThreadID]*piSession)
 	}
 	if existing := a.sessions[request.ProviderThread.ID]; existing != nil {
-		return existing, nil
+		if existing.runtimeMode == request.Start.Thread.RuntimeMode {
+			return existing, nil
+		}
+		existing.broker.cancelAll()
+		existing.client.close()
+		delete(a.sessions, request.ProviderThread.ID)
 	}
 	binary := a.Binary
 	if binary == "" {
 		binary = "pi"
 	}
-	args := []string{"--mode", "rpc", "--no-tools", "--no-extensions", "--no-mcp", "--no-skills",
+	args := []string{"--mode", "rpc", "--tools", "read,grep,find,ls,bash,edit,write", "--no-extensions", "--no-mcp", "--no-skills",
 		"--no-prompt-templates", "--no-context-files", "--no-approve", "--offline"}
+	extensionPath, err := a.permissionExtension()
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, "--extension", extensionPath)
 	if a.SessionDir != "" {
 		args = append(args, "--session-dir", a.SessionDir)
 	}
-	session := &piSession{}
+	session := &piSession{runtimeMode: request.Start.Thread.RuntimeMode, broker: newRequestBroker()}
 	client, err := startRPCClient(rpcClientOptions{Binary: binary, Args: args, Dir: request.Session.CWD, IDPrefix: "g0code-",
+		Env:            append(os.Environ(), "G0CODE_RUNTIME_MODE="+string(request.Start.Thread.RuntimeMode)),
 		OnNotification: func(raw json.RawMessage) { a.handleNotification(session, raw) },
 		OnResponse:     func(raw json.RawMessage) { a.handleNotification(session, raw) }})
 	if err != nil {
@@ -204,6 +218,15 @@ func (a *PiAdapter) handleNotification(session *piSession, raw json.RawMessage) 
 	if json.Unmarshal(raw, &frame) != nil {
 		return
 	}
+	if frame.Type == "extension_ui_request" && frame.Method == "confirm" {
+		var extension struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(raw, &extension)
+		frame.Text = extension.Message
+		go a.answerExtensionConfirmation(session, invocation, frame)
+		return
+	}
 	if frame.Type == "turn_end" && frame.Message.StopReason == "aborted" {
 		invocation.request.setTurnStatus(orchestration.ProviderTurnInterrupted)
 	}
@@ -220,6 +243,37 @@ func (a *PiAdapter) handleNotification(session *piSession, raw json.RawMessage) 
 	if frame.Type == "agent_settled" {
 		invocation.finishOnce.Do(func() { close(invocation.done) })
 	}
+}
+
+func (a *PiAdapter) answerExtensionConfirmation(session *piSession, invocation *piInvocation, frame piFrame) {
+	response, err := session.broker.ask(context.Background(), invocation.request, invocation.emit,
+		frame.ID, orchestration.RequestPermission, frame.Title, frame.Text)
+	confirmed := false
+	cancelled := false
+	if err != nil {
+		cancelled = true
+	} else if response.Decision != nil {
+		confirmed = *response.Decision == "accept" || *response.Decision == "acceptForSession" || *response.Decision == "acceptAlways"
+		cancelled = *response.Decision == "cancel"
+	}
+	_ = session.client.sendRecord(map[string]any{"type": "extension_ui_response", "id": frame.ID,
+		"confirmed": confirmed, "cancelled": cancelled})
+}
+
+func (a *PiAdapter) RespondRuntimeRequest(_ context.Context, response orchestration.RuntimeRequestRespondEffect) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, session := range a.sessions {
+		if response.Request.NativeRequestRef != nil && response.Request.NativeRequestRef.NativeID != nil {
+			session.broker.mu.Lock()
+			_, ok := session.broker.pending[*response.Request.NativeRequestRef.NativeID]
+			session.broker.mu.Unlock()
+			if ok {
+				return session.broker.respond(response)
+			}
+		}
+	}
+	return fmt.Errorf("Pi runtime request is not live: %w", orchestration.ErrRequestNotRespondable)
 }
 
 func (a *PiAdapter) Interrupt(ctx context.Context, effect orchestration.TurnInterruptEffect) error {
@@ -240,6 +294,7 @@ func (a *PiAdapter) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, session := range a.sessions {
+		session.broker.cancelAll()
 		session.client.close()
 	}
 	a.sessions = nil
@@ -294,13 +349,22 @@ func (m *piMessage) UnmarshalJSON(data []byte) error {
 }
 
 type piFrame struct {
-	Type    string    `json:"type"`
-	ID      string    `json:"id"`
-	Command string    `json:"command"`
-	Success bool      `json:"success"`
-	Aborted bool      `json:"aborted"`
-	Message piMessage `json:"message"`
-	Usage   struct {
+	Type          string          `json:"type"`
+	ID            string          `json:"id"`
+	Command       string          `json:"command"`
+	Success       bool            `json:"success"`
+	Aborted       bool            `json:"aborted"`
+	Method        string          `json:"method"`
+	Title         string          `json:"title"`
+	Text          string          `json:"-"`
+	ToolCallID    string          `json:"toolCallId"`
+	ToolName      string          `json:"toolName"`
+	Args          json.RawMessage `json:"args"`
+	PartialResult json.RawMessage `json:"partialResult"`
+	Result        json.RawMessage `json:"result"`
+	IsError       bool            `json:"isError"`
+	Message       piMessage       `json:"message"`
+	Usage         struct {
 		Input       int `json:"input"`
 		Output      int `json:"output"`
 		CacheRead   int `json:"cacheRead"`
@@ -336,6 +400,26 @@ func (a *PiAdapter) handleFrame(ctx context.Context, request RunRequest, raw jso
 	var frame piFrame
 	if err := json.Unmarshal(raw, &frame); err != nil {
 		return err
+	}
+	if strings.HasPrefix(frame.Type, "tool_execution_") && frame.ToolCallID != "" {
+		itemType := "dynamic_tool"
+		switch frame.ToolName {
+		case "bash":
+			itemType = "command_execution"
+		case "edit", "write":
+			itemType = "file_change"
+		}
+		status := orchestration.TurnItemRunning
+		output := frame.PartialResult
+		if frame.Type == "tool_execution_end" {
+			status = orchestration.TurnItemCompleted
+			output = frame.Result
+			if frame.IsError {
+				status = orchestration.TurnItemFailed
+			}
+		}
+		return emitToolCall(ctx, request, emit, ToolCall{ID: frame.ToolCallID, Type: itemType,
+			Title: frame.ToolName, Status: status, Input: frame.Args, Output: output}, raw)
 	}
 	nativeSessionID := frame.ID
 	if frame.Type != "session" {
