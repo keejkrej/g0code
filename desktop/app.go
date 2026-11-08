@@ -51,12 +51,17 @@ type App struct {
 	Draft    string
 	Provider orchestration.ProviderInstanceID
 	Mode     orchestration.RuntimeMode
+	Search   string
+
+	SelectedItemID orchestration.TurnItemID
+	RightOpen      bool
+	RightSplit     float32
 }
 
 func New(o *orchestration.Orchestrator, effects EffectExecutor, config Config) *App {
 	outbox := config.Outbox
 	return &App{orchestrator: o, effects: effects, outbox: outbox, config: config,
-		Provider: config.Provider, Mode: orchestration.RuntimeAutoAcceptEdits}
+		Provider: config.Provider, Mode: orchestration.RuntimeAutoAcceptEdits, RightSplit: 60}
 }
 
 func (a *App) Refresh(ctx context.Context) error {
@@ -115,6 +120,19 @@ func sortThreads(threads []ThreadSummary) {
 			}
 		}
 	}
+}
+
+func (a *App) SelectItem(id orchestration.TurnItemID) {
+	a.mu.Lock()
+	a.SelectedItemID = id
+	a.RightOpen = true
+	a.mu.Unlock()
+}
+
+func (a *App) CloseDetails() {
+	a.mu.Lock()
+	a.RightOpen = false
+	a.mu.Unlock()
 }
 
 func (a *App) NewThread(ctx context.Context) (orchestration.ThreadID, error) {

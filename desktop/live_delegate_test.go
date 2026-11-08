@@ -33,7 +33,7 @@ func TestLiveDesktopDelegatedWorkspaceEdit(t *testing.T) {
 	}
 	app.Draft = "Use a local shell command to run `sleep 60`, then report when it exits. Do not use network or MCP."
 	view.Frame()
-	if err := view.Click("Send"); err != nil {
+	if err := view.Click("↑  Send"); err != nil {
 		t.Fatal(err)
 	}
 	approvePending(t, ctx, app)

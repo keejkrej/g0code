@@ -61,6 +61,7 @@ A successful live case checks exact assistant text, native resume refs, two dist
 ## Current adapter limits
 
 - Persistent native sessions with native resume refs and provider-specific control operations.
+- Provider binaries resolve from the current PATH, common install locations, or the user's login shell; child processes receive the merged PATH for launcher dependencies.
 - Text, reasoning, command, file-change, and dynamic-tool normalization; richer provider-specific items remain follow-up work.
 - Interrupt uses Codex `turn/interrupt`, Claude SDK control requests, Pi `abort`, and ACP `session/cancel`.
 - Provider model value `default` uses the CLI's configured model. Other values are passed through to the CLI.
