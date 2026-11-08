@@ -28,6 +28,8 @@ type claudeSession struct {
 	model          string
 	broker         *requestBroker
 	permissionMode string
+	effort         string
+	fastMode       bool
 }
 
 type claudeInvocation struct {
@@ -68,6 +70,19 @@ func (a *ClaudeAdapter) Run(ctx context.Context, request RunRequest, emit EmitFu
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	if effort, _ := request.Start.Run.ModelSelection.Options["effort"].(string); effort != "" && effort != session.effort {
+		if err := session.client.controlRequest(ctx, map[string]any{"subtype": "set_effort", "effort": effort}); err != nil {
+			return err
+		}
+		session.effort = effort
+	}
+	if fastMode, ok := request.Start.Run.ModelSelection.Options["fastMode"].(bool); ok && fastMode != session.fastMode {
+		if err := session.client.controlRequest(ctx, map[string]any{"subtype": "apply_flag_settings",
+			"settings": map[string]any{"fastMode": fastMode}}); err != nil {
+			return err
+		}
+		session.fastMode = fastMode
+	}
 	permissionMode := claudePermissionMode(request.Start.Thread.RuntimeMode)
 	if permissionMode != session.permissionMode {
 		if err := session.client.controlRequest(ctx, map[string]any{"subtype": "set_permission_mode", "mode": permissionMode}); err != nil {
@@ -124,6 +139,12 @@ func (a *ClaudeAdapter) sessionFor(ctx context.Context, request RunRequest) (*cl
 	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--safe-mode", "--restricted", "--permission-mode", permissionMode,
 		"--permission-prompts", "host", "--strict-mcp-config"}
+	if effort, _ := request.Start.Run.ModelSelection.Options["effort"].(string); effort != "" {
+		args = append(args, "--effort", effort)
+	}
+	if fastMode, ok := request.Start.Run.ModelSelection.Options["fastMode"].(bool); ok && fastMode {
+		args = append(args, "--settings", `{"fastMode":true}`)
+	}
 	nativeID := ""
 	if request.ProviderThread.NativeThreadRef != nil && request.ProviderThread.NativeThreadRef.NativeID != nil {
 		nativeID = *request.ProviderThread.NativeThreadRef.NativeID
@@ -134,6 +155,10 @@ func (a *ClaudeAdapter) sessionFor(ctx context.Context, request RunRequest) (*cl
 	}
 	session := &claudeSession{nativeID: nativeID, model: request.Start.Run.ModelSelection.Model,
 		broker: newRequestBroker(), permissionMode: permissionMode}
+	if effort, _ := request.Start.Run.ModelSelection.Options["effort"].(string); effort != "" {
+		session.effort = effort
+	}
+	session.fastMode, _ = request.Start.Run.ModelSelection.Options["fastMode"].(bool)
 	client, err := startRPCClient(rpcClientOptions{Binary: binary, Args: args, Dir: request.Session.CWD,
 		OnNotification: func(raw json.RawMessage) { a.handleNotification(session, raw) },
 		OnRequest: func(_ context.Context, request rpcRequest) (any, *rpcError) {

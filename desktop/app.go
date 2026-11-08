@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/keejkrej/g0code/orchestration"
+	"github.com/keejkrej/g0code/orchestration/cli"
 )
 
 type EffectExecutor interface {
@@ -19,7 +20,9 @@ type Config struct {
 	ProjectID    orchestration.ProjectID
 	WorktreePath *string
 	Provider     orchestration.ProviderInstanceID
+	Model        string
 	Outbox       orchestration.OutboxStore
+	Catalog      map[orchestration.ProviderInstanceID][]cli.Model
 }
 
 type ThreadSummary struct {
@@ -50,21 +53,27 @@ type App struct {
 
 	Draft    string
 	Provider orchestration.ProviderInstanceID
+	Model    string
+	Options  map[string]any
 	Mode     orchestration.RuntimeMode
 	Search   string
 
 	SelectedItemID orchestration.TurnItemID
 	RightOpen      bool
 	RightSplit     float32
+	Catalog        map[orchestration.ProviderInstanceID][]cli.Model
+	catalogTried   bool
 }
 
 func New(o *orchestration.Orchestrator, effects EffectExecutor, config Config) *App {
 	outbox := config.Outbox
 	return &App{orchestrator: o, effects: effects, outbox: outbox, config: config,
-		Provider: config.Provider, Mode: orchestration.RuntimeAutoAcceptEdits, RightSplit: 60}
+		Provider: config.Provider, Model: config.Model, Options: make(map[string]any), Mode: orchestration.RuntimeAutoAcceptEdits,
+		RightSplit: 60, Catalog: config.Catalog}
 }
 
 func (a *App) Refresh(ctx context.Context) error {
+	_ = a.ensureCatalog(ctx, a.Provider)
 	snapshots, err := a.orchestrator.List(ctx)
 	if err != nil {
 		return err
@@ -107,6 +116,8 @@ func (a *App) Refresh(ctx context.Context) error {
 			a.Children = append(a.Children, child)
 		}
 		a.Provider = snapshot.Projection.Thread.ProviderInstanceID
+		a.Model = snapshot.Projection.Thread.ModelSelection.Model
+		a.Options = cloneOptions(snapshot.Projection.Thread.ModelSelection.Options)
 		a.Mode = snapshot.Projection.Thread.RuntimeMode
 	}
 	return nil
@@ -136,11 +147,12 @@ func (a *App) CloseDetails() {
 }
 
 func (a *App) NewThread(ctx context.Context) (orchestration.ThreadID, error) {
+	_ = a.ensureCatalog(ctx, a.Provider)
 	id := orchestration.ThreadID(newID("thread"))
 	result, err := a.orchestrator.Dispatch(ctx, orchestration.Command{Type: orchestration.CommandThreadCreate,
 		CommandID: orchestration.CommandID(newID("command")), ThreadID: id,
 		Payload: orchestration.CreateThread{ProjectID: a.config.ProjectID, Title: "New thread",
-			ModelSelection: orchestration.ModelSelection{InstanceID: a.Provider, Model: "default"},
+			ModelSelection: a.modelSelection(),
 			RuntimeMode:    a.Mode, InteractionMode: orchestration.InteractionDefault,
 			WorktreePath: a.config.WorktreePath, CreatedBy: orchestration.ActorUser, CreationSource: orchestration.CreationWeb}})
 	if err != nil {
@@ -238,9 +250,64 @@ func (a *App) SetProvider(ctx context.Context, provider orchestration.ProviderIn
 		a.Provider = provider
 		return nil
 	}
+	previous := a.Provider
+	a.Provider = provider
+	if previous != provider {
+		a.Catalog = nil
+		a.catalogTried = false
+		if err := a.ensureCatalog(ctx, provider); err == nil {
+			a.Model = defaultModel(a.Catalog[provider]).ID
+			a.Options = make(map[string]any)
+		}
+	}
+	if a.Selected.Thread.ModelSelection.Equal(a.modelSelection()) {
+		return nil
+	}
 	result, err := a.orchestrator.Dispatch(ctx, orchestration.Command{Type: orchestration.CommandProviderSwitch,
 		CommandID: orchestration.CommandID(newID("command")), ThreadID: a.Selected.Thread.ID,
-		Payload: orchestration.ProviderSwitch{ModelSelection: orchestration.ModelSelection{InstanceID: provider, Model: "default"}}})
+		Payload: orchestration.ProviderSwitch{ModelSelection: a.modelSelection()}})
+	if err != nil {
+		return a.setError(err)
+	}
+	a.finishEffects(result.Effects)
+	return a.Refresh(ctx)
+}
+
+func (a *App) SetModel(ctx context.Context, model string) error {
+	if model == "" {
+		return nil
+	}
+	a.Model = model
+	if a.Selected.Thread.ID == "" {
+		return nil
+	}
+	if a.Selected.Thread.ModelSelection.Equal(a.modelSelection()) {
+		return nil
+	}
+	result, err := a.orchestrator.Dispatch(ctx, orchestration.Command{Type: orchestration.CommandProviderSwitch,
+		CommandID: orchestration.CommandID(newID("command")), ThreadID: a.Selected.Thread.ID,
+		Payload: orchestration.ProviderSwitch{ModelSelection: a.modelSelection()}})
+	if err != nil {
+		return a.setError(err)
+	}
+	a.finishEffects(result.Effects)
+	return a.Refresh(ctx)
+}
+
+func (a *App) SetOption(ctx context.Context, id string, value any) error {
+	if a.Options == nil {
+		a.Options = make(map[string]any)
+	}
+	a.Options[id] = value
+	if a.Selected.Thread.ID == "" {
+		return nil
+	}
+	if a.Selected.Thread.ModelSelection.Equal(a.modelSelection()) {
+		return nil
+	}
+	result, err := a.orchestrator.Dispatch(ctx, orchestration.Command{Type: orchestration.CommandProviderSwitch,
+		CommandID: orchestration.CommandID(newID("command")), ThreadID: a.Selected.Thread.ID,
+		Payload: orchestration.ProviderSwitch{ModelSelection: a.modelSelection()}})
 	if err != nil {
 		return a.setError(err)
 	}
@@ -287,6 +354,69 @@ func (a *App) setErrorString(message string) error {
 	a.mu.Lock()
 	a.Error = message
 	a.mu.Unlock()
+	return nil
+}
+
+func (a *App) modelSelection() orchestration.ModelSelection {
+	model := a.Model
+	if model == "" {
+		model = defaultModel(a.Catalog[a.Provider]).ID
+	}
+	return orchestration.ModelSelection{InstanceID: a.Provider, Model: model, Options: cloneOptions(a.Options)}
+}
+
+func cloneOptions(options map[string]any) map[string]any {
+	if len(options) == 0 {
+		return nil
+	}
+	clone := make(map[string]any, len(options))
+	for key, value := range options {
+		clone[key] = value
+	}
+	return clone
+}
+
+func defaultModel(models []cli.Model) cli.Model {
+	for _, model := range models {
+		if model.ID == "default" {
+			return model
+		}
+	}
+	if len(models) > 0 {
+		return models[0]
+	}
+	return cli.Model{ID: "default", Label: "Default"}
+}
+
+func (a *App) ensureCatalog(ctx context.Context, provider orchestration.ProviderInstanceID) error {
+	if a.Catalog != nil {
+		return nil
+	}
+	if a.config.Catalog != nil {
+		a.Catalog = a.config.Catalog
+		if a.Model == "" || a.Model == "default" {
+			a.Model = defaultModel(a.Catalog[a.Provider]).ID
+		}
+		return nil
+	}
+	if a.catalogTried {
+		return nil
+	}
+	a.catalogTried = true
+	executor, ok := a.effects.(interface {
+		Models(context.Context, orchestration.ProviderInstanceID, string) ([]cli.Model, error)
+	})
+	if !ok {
+		return nil
+	}
+	models, err := executor.Models(ctx, provider, *a.config.WorktreePath)
+	if err != nil {
+		return err
+	}
+	a.Catalog = map[orchestration.ProviderInstanceID][]cli.Model{provider: models}
+	if a.Model == "" || a.Model == "default" {
+		a.Model = defaultModel(models).ID
+	}
 	return nil
 }
 

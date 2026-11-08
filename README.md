@@ -72,7 +72,7 @@ go build -o /tmp/g0code-mcp ./cmd/g0code-mcp
 /tmp/g0code-mcp -workspace /path/to/project -provider codex
 ```
 
-See `orchestration/mcp/README.md` for tools and protocol verification. The Tailscale-first remote-device design is recorded in `docs/connect-architecture.md`.
+See `orchestration/mcp/README.md` for tools and protocol verification. The shared Tailscale-first remote-device design is maintained in `/Users/jack/workspace/t3code-control-plane/README.md`.
 
 ## Development
 

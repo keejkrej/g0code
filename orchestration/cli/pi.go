@@ -29,6 +29,7 @@ type piSession struct {
 	current     *piInvocation
 	model       string
 	sessionName string
+	thinking    string
 	runtimeMode orchestration.RuntimeMode
 	broker      *requestBroker
 }
@@ -196,6 +197,16 @@ func (a *PiAdapter) applySelection(ctx context.Context, session *piSession, requ
 			return fmt.Errorf("Pi set_model failed for %s", model)
 		}
 		session.model = model
+	}
+	if thinking, _ := request.Start.Run.ModelSelection.Options["thinking"].(string); thinking != "" && thinking != session.thinking {
+		var response piFrame
+		if err := session.client.requestRecord(ctx, map[string]any{"type": "set_thinking_level", "level": thinking}, &response); err != nil {
+			return err
+		}
+		if !response.Success {
+			return fmt.Errorf("Pi set_thinking_level failed for %s", thinking)
+		}
+		session.thinking = thinking
 	}
 	if title := request.Start.Thread.Title; title != "" && title != session.sessionName {
 		var response piFrame

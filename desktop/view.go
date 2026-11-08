@@ -146,6 +146,19 @@ func (a *App) viewComposer(c *ui.Context, selected selectedSnapshot) {
 	theme := c.Theme()
 	ui.Column(c).FillWidth().MaxWidth(900).Margin(0, ui.Auto, 16).Background(theme.Surface).Border(1, theme.Border).Radius(16).Padding(14).Gap(10).Children(func() {
 		ui.TextAreaBase(c.Key("composer"), &a.Draft).Lines(3, 8).Placeholder("Ask anything. @ files, $ skills, / commands")
+		modelID := a.Model
+		modelChoices := make([]string, 0)
+		for _, model := range a.Catalog[a.Provider] {
+			modelChoices = append(modelChoices, model.ID)
+		}
+		if modelID == "" && len(modelChoices) > 0 {
+			modelID = modelChoices[0]
+		}
+		combo := ui.Combobox(c.Key("model"), &modelID, modelChoices).Label("Model")
+		if modelID != "" && combo.Changed() {
+			_ = a.SetModel(context.Background(), modelID)
+		}
+		a.viewModelOptions(c)
 		ui.Row(c).Gap(8).Wrap().Children(func() {
 			provider := string(a.Provider)
 			if ui.Combobox(c.Key("provider"), &provider, []string{"codex", "claude", "pi", "agy", "fx"}).Label("Provider").Changed() {
@@ -168,6 +181,42 @@ func (a *App) viewComposer(c *ui.Context, selected selectedSnapshot) {
 			}
 		})
 	})
+}
+
+func (a *App) viewModelOptions(c *ui.Context) {
+	for _, option := range defaultModel(a.Catalog[a.Provider]).Options {
+		switch option.Type {
+		case "boolean":
+			checked := optionBool(a.Options[option.ID], option.Default)
+			if ui.Checkbox(c.Key(option.ID), &checked, option.Label).Changed() {
+				_ = a.SetOption(context.Background(), option.ID, checked)
+			}
+		default:
+			value := optionString(a.Options[option.ID], option.Default)
+			if value == "" && len(option.Values) > 0 {
+				value = option.Values[0]
+			}
+			if ui.Combobox(c.Key(option.ID), &value, option.Values).Label(option.Label).Changed() {
+				_ = a.SetOption(context.Background(), option.ID, value)
+			}
+		}
+	}
+}
+
+func optionBool(value, fallback any) bool {
+	if typed, ok := value.(bool); ok {
+		return typed
+	}
+	typed, _ := fallback.(bool)
+	return typed
+}
+
+func optionString(value, fallback any) string {
+	if typed, ok := value.(string); ok && typed != "" {
+		return typed
+	}
+	typed, _ := fallback.(string)
+	return typed
 }
 
 func (a *App) viewTurnItem(c *ui.Context, item orchestration.TurnItem, selected bool) {

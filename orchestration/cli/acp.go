@@ -32,12 +32,13 @@ type acpTurnState struct {
 }
 
 type acpSession struct {
-	client    *rpcClient
-	nativeID  string
-	mu        sync.Mutex
-	currentMu sync.RWMutex
-	current   *acpInvocation
-	broker    *requestBroker
+	client     *rpcClient
+	nativeID   string
+	mu         sync.Mutex
+	currentMu  sync.RWMutex
+	current    *acpInvocation
+	broker     *requestBroker
+	configured map[string]any
 }
 
 type acpInvocation struct {
@@ -72,6 +73,9 @@ func (a *ACPAdapter) Run(ctx context.Context, request RunRequest, emit EmitFunc)
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	if err := a.applyACPOptions(ctx, session, request); err != nil {
+		return err
+	}
 	invocation := &acpInvocation{request: request, emit: emit}
 	session.currentMu.Lock()
 	session.current = invocation
@@ -150,7 +154,7 @@ func (a *ACPAdapter) sessionFor(ctx context.Context, request RunRequest, emit Em
 	if len(args) == 0 {
 		args = []string{"acp"}
 	}
-	session := &acpSession{broker: newRequestBroker()}
+	session := &acpSession{broker: newRequestBroker(), configured: make(map[string]any)}
 	client, err := startRPCClient(rpcClientOptions{Binary: binary, Args: args, Dir: request.Session.CWD,
 		OnNotification: func(raw json.RawMessage) {
 			session.currentMu.RLock()
@@ -219,26 +223,68 @@ func (a *ACPAdapter) sessionFor(ctx context.Context, request RunRequest, emit Em
 		json.RawMessage(`{"method":"`+method+`"}`)); err != nil {
 		return fail(err)
 	}
-	if effort, _ := request.Start.Run.ModelSelection.Options["reasoningEffort"].(string); effort != "" {
-		if err := client.call(ctx, "session/set_config_option", map[string]any{"sessionId": session.nativeID,
-			"configId": "effort", "value": effort}, nil); err != nil {
+	if effort := acpEffort(request.Start.Run.ModelSelection); effort != "" {
+		if err := a.setConfig(ctx, session, "effort", effort); err != nil {
 			return fail(err)
 		}
 	}
 	if a.Mode != "" {
-		if err := client.call(ctx, "session/set_config_option", map[string]any{"sessionId": session.nativeID,
-			"configId": "mode", "value": a.Mode}, nil); err != nil {
+		if err := a.setConfig(ctx, session, "mode", a.Mode); err != nil {
 			return fail(err)
 		}
 	}
 	if model := request.Start.Run.ModelSelection.Model; model != "" && model != "default" {
-		if err := client.call(ctx, "session/set_config_option", map[string]any{"sessionId": session.nativeID,
-			"configId": "model", "value": model}, nil); err != nil {
+		if err := a.setConfig(ctx, session, "model", model); err != nil {
 			return fail(err)
 		}
 	}
 	a.sessions[request.ProviderThread.ID] = session
 	return session, nil
+}
+
+func acpEffort(selection orchestration.ModelSelection) string {
+	if effort, _ := selection.Options["effort"].(string); effort != "" {
+		return effort
+	}
+	effort, _ := selection.Options["reasoningEffort"].(string)
+	return effort
+}
+
+func (a *ACPAdapter) setConfig(ctx context.Context, session *acpSession, id string, value any) error {
+	if text, ok := value.(string); ok && text == "" {
+		return nil
+	}
+	if current, ok := session.configured[id]; ok && current == value {
+		return nil
+	}
+	if err := session.client.call(ctx, "session/set_config_option", map[string]any{"sessionId": session.nativeID,
+		"configId": id, "value": value}, nil); err != nil {
+		return err
+	}
+	session.configured[id] = value
+	return nil
+}
+
+func (a *ACPAdapter) applyACPOptions(ctx context.Context, session *acpSession, request RunRequest) error {
+	if err := a.setConfig(ctx, session, "effort", acpEffort(request.Start.Run.ModelSelection)); err != nil {
+		return err
+	}
+	if model := request.Start.Run.ModelSelection.Model; model != "" && model != "default" {
+		if err := a.setConfig(ctx, session, "model", model); err != nil {
+			return err
+		}
+	}
+	for id, value := range request.Start.Run.ModelSelection.Options {
+		switch id {
+		case "model", "effort", "reasoningEffort":
+			continue
+		default:
+			if err := a.setConfig(ctx, session, id, value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (a *ACPAdapter) handleNativeRequest(session *acpSession, request rpcRequest) (any, *rpcError) {

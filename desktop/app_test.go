@@ -11,6 +11,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/keejkrej/g0code/orchestration"
+	"github.com/keejkrej/g0code/orchestration/cli"
 )
 
 type fakeExecutor struct {
@@ -124,6 +125,71 @@ func TestDesktopThreadPromptAndApproval(t *testing.T) {
 	resolved, _ := snapshot.Projection.RuntimeRequest(request.ID)
 	if resolved.Status != orchestration.RequestResolved {
 		t.Fatalf("request not resolved: %+v", resolved)
+	}
+}
+
+func TestDesktopModelAndOptionControls(t *testing.T) {
+	ctx := context.Background()
+	o := orchestration.New(nil)
+	executor := &fakeExecutor{orchestrator: o, release: make(chan struct{})}
+	catalog := map[orchestration.ProviderInstanceID][]cli.Model{
+		"codex": {
+			{ID: "gpt-test", Label: "GPT Test", Options: []cli.ModelOption{
+				{ID: "reasoningEffort", Label: "Reasoning", Type: "select", Values: []string{"low", "high"}, Default: "low"},
+				{ID: "serviceTier", Label: "Service Tier", Type: "select", Values: []string{"standard", "ultrafast"}, Default: "standard"},
+			}},
+		},
+		"claude": {
+			{ID: "default", Label: "Default", Options: []cli.ModelOption{{ID: "fastMode", Label: "Fast mode", Type: "boolean", Default: false}}},
+		},
+	}
+	workspace := t.TempDir()
+	app := New(o, executor, Config{ProjectID: "local", WorktreePath: &workspace, Provider: "codex", Catalog: catalog})
+	view := ui.NewTester(app.View, 1200, 760)
+	if _, err := app.NewThread(ctx); err != nil {
+		t.Fatal(err)
+	}
+	view.Frame()
+	if !view.HasText("Model") || !view.HasText("Reasoning") || !view.HasText("Service Tier") {
+		t.Fatalf("model controls missing: %q", view.Texts())
+	}
+	if err := app.SetModel(ctx, "gpt-test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SetOption(ctx, "reasoningEffort", "high"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SetOption(ctx, "serviceTier", "ultrafast"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := o.Snapshot(ctx, app.SelectedID)
+	selection := snapshot.Projection.Thread.ModelSelection
+	if selection.Model != "gpt-test" || selection.Options["reasoningEffort"] != "high" || selection.Options["serviceTier"] != "ultrafast" {
+		t.Fatalf("model options not durable: %+v", selection)
+	}
+	if err := app.SetProvider(ctx, "claude"); err != nil {
+		t.Fatalf("provider switch failed: %v; selection=%+v", err, app.modelSelection())
+	}
+	view.Frame()
+	if !view.HasText("Fast mode") {
+		t.Fatalf("fast mode control missing: %q", view.Texts())
+	}
+	if err := view.Click("Fast mode"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ = o.Snapshot(ctx, app.SelectedID)
+	if snapshot.Projection.Thread.ModelSelection.Options["fastMode"] != true {
+		t.Fatalf("fast mode not enabled: %+v", snapshot.Projection.Thread.ModelSelection)
+	}
+	if path := os.Getenv("G0CODE_CAPTURE_MODEL"); path != "" {
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := png.Encode(file, view.Image()); err != nil {
+			t.Fatal(err)
+		}
+		_ = file.Close()
 	}
 }
 

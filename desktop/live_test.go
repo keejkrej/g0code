@@ -51,7 +51,7 @@ func TestLiveDesktopWorkspaceEdit(t *testing.T) {
 		run := snapshot.Projection.Runs[0]
 		if run.Status.Terminal() {
 			if run.Status != orchestration.RunCompleted {
-				t.Fatalf("desktop run failed: %+v", run)
+				t.Fatalf("desktop run failed: run=%+v items=%+v", run, snapshot.Projection.TurnItems)
 			}
 			break
 		}

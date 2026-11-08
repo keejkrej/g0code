@@ -8,6 +8,7 @@ The native desktop app uses MyGo `v0.8.3`, with Go `1.27.3` and the MyGo CLI pin
 - T3-style sidebar, conversation/tool timeline, resizable file/diff pane, and rounded composer.
 - Message/run timeline with tool activity and delegated child links.
 - Codex, Claude, Pi, Agy, and Fx provider selection.
+- Native model catalogs with concrete default-model selection, reasoning/effort, service tier, thinking, and fast-mode controls where supported.
 - Approval-required, auto-accept-edits, auto, and explicit full-access modes.
 - Parent/child pending-request controls.
 - Delegation, native interruption, and child result publication.
