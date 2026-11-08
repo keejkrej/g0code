@@ -16,8 +16,9 @@ Options:
 - `-provider codex|claude|pi|agy|fx`: default provider.
 - `-model default`: use the provider CLI's configured model, or pass an explicit model.
 - `-parent-thread <id>`: optionally pin delegated-task tools to a parent thread. Without it, local testing accepts `parentThreadId` in `delegate_task`, `task_status`, and `task_cancel`.
+- `-state <path>`: SQLite state path. Defaults to `~/.g0code/orchestration.sqlite`; use `-state :memory:` for an ephemeral server.
 
-Logs and asynchronous effect failures go to stderr. stdout carries only MCP frames. State is currently in-memory, so this is a development/debug server rather than a durable production daemon.
+Logs and asynchronous effect failures go to stderr. stdout carries only MCP frames. Events, command receipts, and pending provider effects are durable by default. A leased outbox worker executes effects and recovers expired claims after restart.
 
 Example MCP client configuration:
 

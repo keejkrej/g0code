@@ -1,6 +1,7 @@
 package orchestration
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -268,6 +269,51 @@ type Effect struct {
 	CommandID CommandID  `json:"commandId"`
 	ThreadID  ThreadID   `json:"threadId"`
 	Payload   any        `json:"payload"`
+}
+
+func (e Effect) MarshalJSON() ([]byte, error) {
+	type effectAlias Effect
+	return json.Marshal(effectAlias(e))
+}
+
+func (e *Effect) UnmarshalJSON(data []byte) error {
+	type effectAlias Effect
+	var decoded struct {
+		effectAlias
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*e = Effect(decoded.effectAlias)
+	var target any
+	switch e.Kind {
+	case EffectProviderTurnStart:
+		target = &TurnStartEffect{}
+	case EffectProviderTurnInterrupt:
+		target = &TurnInterruptEffect{}
+	case EffectProviderRuntimeRequestRespond:
+		target = &RuntimeRequestRespondEffect{}
+	default:
+		var unknown any
+		if err := json.Unmarshal(decoded.Payload, &unknown); err != nil {
+			return err
+		}
+		e.Payload = unknown
+		return nil
+	}
+	if err := json.Unmarshal(decoded.Payload, target); err != nil {
+		return err
+	}
+	switch value := target.(type) {
+	case *TurnStartEffect:
+		e.Payload = *value
+	case *TurnInterruptEffect:
+		e.Payload = *value
+	case *RuntimeRequestRespondEffect:
+		e.Payload = *value
+	}
+	return nil
 }
 
 type DispatchResult struct {

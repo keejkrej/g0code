@@ -136,7 +136,7 @@ func (o *Orchestrator) Ingest(ctx context.Context, input IngestInput) (IngestRes
 		return IngestResult{Sequence: snapshot.SnapshotSequence, StoredEvents: []StoredEvent{}}, nil
 	}
 	committed, err := o.store.Commit(ctx, CommitInput{ThreadID: input.ThreadID,
-		ExpectedSequence: snapshot.SnapshotSequence, Events: plan.events, CommandID: input.CommandID,
+		ExpectedSequence: snapshot.SnapshotSequence, Events: plan.events, Effects: plan.effects, CommandID: input.CommandID,
 		ExpectedSequences: plan.expectedSequences})
 	if err != nil {
 		return IngestResult{}, fmt.Errorf("commit provider event: %w", err)
