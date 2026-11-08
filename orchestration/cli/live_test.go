@@ -88,6 +88,39 @@ func TestLiveCLIOrchestration(t *testing.T) {
 	}
 }
 
+func TestLiveModelCatalogs(t *testing.T) {
+	if os.Getenv("G0CODE_LIVE") != "1" {
+		t.Skip("set G0CODE_LIVE=1 to query native model catalogs")
+	}
+	o := orchestration.New(nil)
+	executor := NewExecutor(o)
+	executor.RegisterDefaults()
+	defer executor.Close()
+	for _, instance := range []orchestration.ProviderInstanceID{"codex", "pi", "agy", "fx", "claude"} {
+		t.Run(string(instance), func(t *testing.T) {
+			models, err := executor.Models(context.Background(), instance, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(models) == 0 {
+				t.Fatal("empty model catalog")
+			}
+			found := false
+			for _, model := range models {
+				for _, option := range model.Options {
+					switch option.ID {
+					case "reasoningEffort", "thinking", "effort", "serviceTier", "fastMode":
+						found = true
+					}
+				}
+			}
+			if !found && instance != "agy" {
+				t.Fatalf("no reasoning/service/fast options in catalog: %+v", models)
+			}
+		})
+	}
+}
+
 func TestLiveCodexWorkspaceEdit(t *testing.T) {
 	if os.Getenv("G0CODE_LIVE") != "1" {
 		t.Skip("set G0CODE_LIVE=1 to run the real provider")

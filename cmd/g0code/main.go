@@ -21,6 +21,7 @@ func main() {
 	cwd, _ := os.Getwd()
 	workspace := flag.String("workspace", cwd, "workspace used by new agent threads")
 	provider := flag.String("provider", "codex", "default provider: codex, claude, pi, agy, or fx")
+	model := flag.String("model", "default", "default model; default uses the CLI's configured model")
 	stateDefault := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		stateDefault = filepath.Join(home, ".g0code", "orchestration.sqlite")
@@ -39,7 +40,7 @@ func main() {
 	executor.RegisterDefaults()
 	defer executor.Close()
 	application := desktop.New(o, executor, desktop.Config{ProjectID: "local", WorktreePath: workspace,
-		Provider: orchestration.ProviderInstanceID(*provider), Outbox: store})
+		Provider: orchestration.ProviderInstanceID(*provider), Model: *model, Outbox: store})
 	if err := application.Refresh(context.Background()); err != nil {
 		log.Fatal(err)
 	}

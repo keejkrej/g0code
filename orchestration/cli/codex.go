@@ -253,6 +253,14 @@ func (a *CodexAdapter) handleNotification(session *codexSession, raw json.RawMes
 	}
 }
 
+func codexSelectionSettings(selection orchestration.ModelSelection) map[string]any {
+	settings := map[string]any{"model": selection.Model}
+	if effort, _ := selection.Options["reasoningEffort"].(string); effort != "" {
+		settings["reasoning_effort"] = effort
+	}
+	return settings
+}
+
 func codexTurnStartParams(request RunRequest, nativeThreadID, model string) map[string]any {
 	approvalPolicy := "untrusted"
 	approvalsReviewer := "user"
@@ -269,14 +277,18 @@ func codexTurnStartParams(request RunRequest, nativeThreadID, model string) map[
 	if interactionMode == "" {
 		interactionMode = orchestration.InteractionDefault
 	}
-	return map[string]any{
+	params := map[string]any{
 		"threadId": nativeThreadID,
 		"input":    []any{map[string]any{"type": "text", "text": promptText(request.Start)}},
 		"cwd":      request.Session.CWD, "model": model, "summary": "detailed",
 		"approvalPolicy": approvalPolicy, "approvalsReviewer": approvalsReviewer,
 		"sandboxPolicy":     map[string]any{"type": sandboxType},
-		"collaborationMode": map[string]any{"mode": interactionMode, "settings": map[string]any{"model": model}},
+		"collaborationMode": map[string]any{"mode": interactionMode, "settings": codexSelectionSettings(request.Start.Run.ModelSelection)},
 	}
+	if tier, _ := request.Start.Run.ModelSelection.Options["serviceTier"].(string); tier != "" {
+		params["serviceTier"] = tier
+	}
+	return params
 }
 
 func (a *CodexAdapter) handleNativeRequest(session *codexSession, request rpcRequest) (any, *rpcError) {

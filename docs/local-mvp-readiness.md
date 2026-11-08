@@ -10,7 +10,9 @@ This is an early CLI-first/desktop MVP, not a complete t3code port or an unatten
 
 | Capability | Status | Evidence/limits |
 | --- | --- | --- |
-| MyGo desktop app | Ready for local trial | Native thread sidebar, timeline, composer, provider/runtime controls, delegation, stop, and parent/child approvals |
+| MyGo desktop app | Ready for local trial | Thread sidebar, timeline, composer, provider/model/runtime controls, delegation, stop, and parent/child approvals |
+| Provider/model selection | Working native catalogs | Concrete default model, reasoning/effort, service tier, thinking, and fast mode where supported |
+| Approval-required, auto-accept-edits, auto, full-access modes. | Explicit runtime ceilings | `full-access` remains dangerous by design |
 | Standalone MCP server | Ready for local use | `cmd/g0code-mcp`; stdio MCP initialize/list/call verified |
 | Codex native integration | Working coding path | Persistent app-server, thread resume, native tool events/approvals/interrupt; live edit and delegated edit tests |
 | Pi native integration | Working coding path | Persistent RPC, native tools, blocking permission extension, abort, settled usage |
