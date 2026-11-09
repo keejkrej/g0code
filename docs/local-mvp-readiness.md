@@ -25,7 +25,7 @@ This is an early CLI-first/desktop MVP, not a complete t3code port or an unatten
 | Active steering/restart | Not implemented | Queueing works; explicit steer/restart remains a later slice |
 | Checkpoints/rollback | Not implemented | Graph records exist; filesystem capture/restore does not |
 | Complete provider parity | Not claimed | Rich provider-specific plans, subagents, compaction, background work, and attachments need more fixtures |
-| Remote devices | Design only | Tailscale-first architecture documented; no daemon/control plane implementation |
+| Remote devices | Library only | `controlplane` package implements the protocol v1 client (pairing, heartbeat, GUI authorization, device list, connect tokens), Ed25519 device identity, and a connect-token verifier/HTTP middleware checked against the shared test vectors. The device daemon (pairing CLI, heartbeat loop, authenticated Tailscale listener) and desktop integration are not wired yet. |
 
 ## Verified acceptance workflow
 

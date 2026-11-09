@@ -41,6 +41,7 @@ Implemented in this first vertical slice:
 - Durable SQLite events, receipts, and leased effect outbox with restart/recovery tests.
 - Read-only local CLI adapters for Codex, Claude Code, Pi, Agy (ACP), and Fx (ACP), with fixture-backed parity and opt-in live integration tests. See `orchestration/cli/README.md`.
 - A native MyGo desktop MVP with local threads, coding tools, delegation, approvals, and interruption. See `desktop/README.md`.
+- A stdlib-only `controlplane` package for the t3code control-plane protocol v1. It covers device pairing and heartbeat, the GUI authorization and connect-token client, Ed25519 device identity, a connect-token verifier with JWKS cache and HTTP middleware, and checks against the shared test vectors. The device daemon is not wired yet. See `controlplane/README.md`.
 
 ### Public seams
 
